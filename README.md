@@ -16,7 +16,7 @@ npx skills add shino369/kyoten-skills
 # Install specific skills
 npx skills add shino369/kyoten-skills --skill transparent-background
 npx skills add shino369/kyoten-skills --skill dependency-update security-update
-npx skills add shino369/kyoten-skills --skill translation-expertise engineering-terminology document-writing
+npx skills add shino369/kyoten-skills --skill translation-expertise
 ```
 
 Using `pnpm`:
@@ -40,13 +40,11 @@ pnpm dlx skills add shino369/kyoten-skills --skill transparent-background --agen
 | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
 | [`transparent-background`](skills/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes. | `uv` (Python 3.12 + Pillow, NumPy, SciPy) |
 
-### Trilingual Translation & Writing (EN ↔ JA ↔ zh-TW)
+### Trilingual Translation (EN ↔ JA ↔ zh-TW)
 
-| Skill                                                                | Description                                                                                | Runtime |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ------- |
-| [`translation-expertise`](skills/translation-expertise/SKILL.md)     | Methodology, house styles, and language references for EN/JA/zh-TW translation.            | None    |
-| [`engineering-terminology`](skills/engineering-terminology/SKILL.md) | Technical glossaries across six engineering domains (software, web, devops, data, AI, HW). | None    |
-| [`document-writing`](skills/document-writing/SKILL.md)               | Monolingual writing conventions, structure, and rhetorical patterns for EN, JA, zh-TW.     | None    |
+| Skill                                                            | Description                                                                                            | Runtime |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------- |
+| [`translation-expertise`](skills/translation-expertise/SKILL.md) | House styles, 1:1 structural parity, and JA/zh-TW terminology trap guards for EN/JA/zh-TW translation. | None    |
 
 ## Development & Verification
 
