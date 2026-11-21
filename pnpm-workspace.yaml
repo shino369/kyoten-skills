@@ -1,0 +1,13 @@
+packages:
+  - .
+
+minimumReleaseAge: 10080
+
+allowBuilds:
+  esbuild: true
+
+engineStrict: true
+
+strictPeerDependencies: true
+
+trustPolicy: no-downgrade

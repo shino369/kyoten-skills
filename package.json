@@ -1,0 +1,32 @@
+{
+  "name": "kyoten-skills",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reusable Agent Skills for pnpm maintenance, image background removal, and EN/JA/zh-TW trilingual translation",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:python": "uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow --with numpy --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/transparent-background/scripts --cov=imgalpha --cov-branch --cov-fail-under=100",
+    "format": "prettier --write \"**/*.{js,mjs,json,md,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{js,mjs,json,md,yaml,yml}\"",
+    "check": "pnpm format:check && pnpm test:coverage && pnpm test:python"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shino369/kyoten-skills.git"
+  },
+  "author": "shino369",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=12.14.0"
+  },
+  "packageManager": "pnpm@12.14.0+sha512.c18ba6d87993d3d164cb5e8948f32b2c06ee854487e06cd8d86781342fb3e5bb4634367034711e86802baa9c37bea906ce1929ad08d70884c97d801df13389a6",
+  "devDependencies": {
+    "@vitest/coverage-v8": "^5.1.0",
+    "prettier": "^3.9.10",
+    "vite": "^8.3.7",
+    "vitest": "^5.1.0"
+  }
+}
