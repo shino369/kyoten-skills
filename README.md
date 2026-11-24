@@ -2,8 +2,8 @@
 
 Reusable [Agent Skills](https://skills.sh) originally built for the
 `claude-code-personal-workspace` / `kyoten` workspace — covering pnpm dependency and security
-maintenance, flat-background image cutout and recolouring, and EN ↔ JA ↔ zh-TW trilingual
-translation.
+maintenance, flat-background image cutout and recolouring, Unity and KiriKiri2/Z game image
+extraction, and EN ↔ JA ↔ zh-TW trilingual translation.
 
 ## Install
 
@@ -15,6 +15,7 @@ npx skills add shino369/kyoten-skills
 
 # Install specific skills
 npx skills add shino369/kyoten-skills --skill transparent-background
+npx skills add shino369/kyoten-skills --skill game-image-extraction
 npx skills add shino369/kyoten-skills --skill dependency-update security-update
 npx skills add shino369/kyoten-skills --skill translation-expertise
 ```
@@ -34,11 +35,12 @@ pnpm dlx skills add shino369/kyoten-skills --skill transparent-background --agen
 | [`dependency-update`](skills/dependency-update/SKILL.md) | Dependabot-style pnpm maintenance: catalog/`package.json` bumps, Node/pnpm upgrades, Dependabot PR review.     | Node 24+, `pnpm`, optional `gh` |
 | [`security-update`](skills/security-update/SKILL.md)     | Patch vulnerable npm/pnpm packages via `pnpm audit`, release-age verification, parent upgrades, and overrides. | Node 24+, `pnpm`                |
 
-### Image Processing
+### Image Processing & Game Assets
 
-| Skill                                                              | Description                                                                                              | Runtime                                   |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| [`transparent-background`](skills/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes. | `uv` (Python 3.12 + Pillow, NumPy, SciPy) |
+| Skill                                                              | Description                                                                                                         | Runtime                                         |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [`transparent-background`](skills/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes.            | `uv` (Python 3.12 + Pillow, NumPy, SciPy)       |
+| [`game-image-extraction`](skills/game-image-extraction/SKILL.md)   | Extract, convert, and verify images from Unity (`*_Data`/Addressables) and KiriKiri2/Z (`.xp3`/TLG/PSB-PIMG) games. | `uv` (Python 3.12 + Pillow, optional `UnityPy`) |
 
 ### Trilingual Translation (EN ↔ JA ↔ zh-TW)
 
