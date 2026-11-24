@@ -92,5 +92,5 @@ pixel keeps its light/dark deviation, so brush or crayon texture survives. Pick 
 When developing inside the skill repository, run the Python test suite with 100% branch coverage:
 
 ```bash
-uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow --with numpy --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/transparent-background/scripts --cov=imgalpha --cov-branch --cov-fail-under=100
+uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow --with numpy --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/creative/transparent-background/scripts --cov=imgalpha --cov-branch --cov-fail-under=100
 ```

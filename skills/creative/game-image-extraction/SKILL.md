@@ -119,5 +119,5 @@ Report to the user:
 When developing inside the skill repository, run the Python test suite with 100% branch coverage:
 
 ```bash
-uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow python -I -B -m pytest -q -p no:cacheprovider skills/game-image-extraction/scripts --cov=game_extract --cov-branch --cov-fail-under=100
+uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow python -I -B -m pytest -q -p no:cacheprovider skills/creative/game-image-extraction/scripts --cov=game_extract --cov-branch --cov-fail-under=100
 ```

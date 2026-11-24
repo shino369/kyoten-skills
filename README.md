@@ -1,52 +1,58 @@
 # kyoten-skills
 
 Reusable [Agent Skills](https://skills.sh) originally built for the
-`claude-code-personal-workspace` / `kyoten` workspace — covering pnpm dependency and security
-maintenance, flat-background image cutout and recolouring, Unity and KiriKiri2/Z game image
-extraction, and EN ↔ JA ↔ zh-TW trilingual translation.
+`claude-code-personal-workspace` / `kyoten` workspace — organized by category under `skills/`:
+
+- `skills/dependencies/` — pnpm dependency and security maintenance (included in `kyoten` by default)
+- `skills/translation/` — EN ↔ JA ↔ zh-TW trilingual translation (included in `kyoten` by default)
+- `skills/creative/` — image cutout/recolouring and Unity/KiriKiri game image extraction (opt-in)
 
 ## Install
 
-Install all skills or pick only what you need with [skills.sh](https://skills.sh):
+Install interactively or pick specific skills with [skills.sh](https://skills.sh):
 
 ```bash
-# Install all skills
+# Interactive picker (choose which skills to install)
 npx skills add shino369/kyoten-skills
 
-# Install specific skills
+# Install the kyoten default set (dependencies + translation)
+npx skills add shino369/kyoten-skills --skill dependency-update security-update translation-expertise
+
+# Install opt-in creative skills on demand
 npx skills add shino369/kyoten-skills --skill transparent-background
 npx skills add shino369/kyoten-skills --skill game-image-extraction
-npx skills add shino369/kyoten-skills --skill dependency-update security-update
-npx skills add shino369/kyoten-skills --skill translation-expertise
 ```
 
-Using `pnpm`:
+Using `pnpm` (e.g. inside `kyoten`):
 
 ```bash
 pnpm dlx skills add shino369/kyoten-skills --skill transparent-background --agent claude-code codex -y
+pnpm dlx skills add shino369/kyoten-skills --skill game-image-extraction --agent claude-code codex -y
 ```
 
 ## Available Skills
 
-### Maintenance & Security
+### Dependencies (`skills/dependencies/`) — Default in `kyoten`
 
-| Skill                                                    | Description                                                                                                    | Runtime                         |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| [`dependency-update`](skills/dependency-update/SKILL.md) | Dependabot-style pnpm maintenance: catalog/`package.json` bumps, Node/pnpm upgrades, Dependabot PR review.     | Node 24+, `pnpm`, optional `gh` |
-| [`security-update`](skills/security-update/SKILL.md)     | Patch vulnerable npm/pnpm packages via `pnpm audit`, release-age verification, parent upgrades, and overrides. | Node 24+, `pnpm`                |
+| Skill                                                                 | Description                                                                                                    | Runtime                         |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| [`dependency-update`](skills/dependencies/dependency-update/SKILL.md) | Dependabot-style pnpm maintenance: catalog/`package.json` bumps, Node/pnpm upgrades, Dependabot PR review.     | Node 24+, `pnpm`, optional `gh` |
+| [`security-update`](skills/dependencies/security-update/SKILL.md)     | Patch vulnerable npm/pnpm packages via `pnpm audit`, release-age verification, parent upgrades, and overrides. | Node 24+, `pnpm`                |
 
-### Image Processing & Game Assets
+### Translation (`skills/translation/`) — Default in `kyoten`
 
-| Skill                                                              | Description                                                                                                         | Runtime                                         |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| [`transparent-background`](skills/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes.            | `uv` (Python 3.12 + Pillow, NumPy, SciPy)       |
-| [`game-image-extraction`](skills/game-image-extraction/SKILL.md)   | Extract, convert, and verify images from Unity (`*_Data`/Addressables) and KiriKiri2/Z (`.xp3`/TLG/PSB-PIMG) games. | `uv` (Python 3.12 + Pillow, optional `UnityPy`) |
+| Skill                                                                        | Description                                                                                            | Runtime |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------- |
+| [`translation-expertise`](skills/translation/translation-expertise/SKILL.md) | House styles, 1:1 structural parity, and JA/zh-TW terminology trap guards for EN/JA/zh-TW translation. | None    |
 
-### Trilingual Translation (EN ↔ JA ↔ zh-TW)
+### Creative (`skills/creative/`) — Opt-in
 
-| Skill                                                            | Description                                                                                            | Runtime |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------- |
-| [`translation-expertise`](skills/translation-expertise/SKILL.md) | House styles, 1:1 structural parity, and JA/zh-TW terminology trap guards for EN/JA/zh-TW translation. | None    |
+Not installed by default during `kyoten` initialization; install individually when needed.
+
+| Skill                                                                       | Description                                                                                                         | Runtime                                         |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [`transparent-background`](skills/creative/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes.            | `uv` (Python 3.12 + Pillow, NumPy, SciPy)       |
+| [`game-image-extraction`](skills/creative/game-image-extraction/SKILL.md)   | Extract, convert, and verify images from Unity (`*_Data`/Addressables) and KiriKiri2/Z (`.xp3`/TLG/PSB-PIMG) games. | `uv` (Python 3.12 + Pillow, optional `UnityPy`) |
 
 ## Development & Verification
 
