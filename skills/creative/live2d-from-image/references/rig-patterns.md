@@ -75,7 +75,7 @@ The clean, native Cubism v5 solution (upgraded with the 3-layer cast-shadow arch
    - **Rear silhouette / outer band** with a smooth solid-fabric underfill extending ~4–5% inward behind the front rim so Z-parallax never opens a gap.
    - **Front detail rim** (e.g., scalloped lace or front brim).
    - **Optional soft cast-shadow layer** (tinted, Gaussian-blurred silhouette copy placed beneath the headwear or bangs/collar with reduced opacity or multiply blending) so shadows glide across the hair, forehead, and chest when hair/headwear moves.
-   - Separate hanging left/right ribbons for independent pendulum physics (`swing_put`).
+   - Separate hanging left/right ribbons for independent pendulum physics (prefer short-ID `author_axes` + `physics_modifiers` over `swing_put` in PSD2Live 3.8.4 so ribbon output IDs never truncate in `.moc3`).
 2. **Rebind all headwear meshes** off `DeformHairFrontFollow` onto the clean head container (`頭部コンテナ` / `DeformHeadContainer`).
 3. **Author subtle convex 3D parallax on new dedicated parameters** (`ParamHdYaw` `[-1, 1]` and `ParamHdPitch` `[-1, 1]`):
    - Use a 5×3 `landmarks` grid where the front rim shifts ~8–10 px farther toward the turn than the rear band, while the far side compresses gently inward and the crown peak stays highest.
@@ -135,7 +135,7 @@ Studying high-quality hand-rigged Live2D models reveals two physics layers that 
 ## 7. Orthogonal Prop / Pose Toggles, `Blend: "Add"` & Ambient Loops
 
 - Keep facial expressions (`exp_smile`, `exp_cry`, ...) strictly separate from accessory/pose toggles. Strip all `ParamEye*`, `ParamMouth*`, `ParamCheek`, and `ParamBrow*` entries from prop/pose `exp3` files so any prop works with any facial expression.
-- Prefer single-parameter `0 → 1` toggles with `"blend": "add"` for facial overlays (blush, tears, sweat, pale shadow) and independent accessories/arms so hotkeys in VTube Studio combine freely without overwriting each other.
+- Prefer single-parameter `0 → 1` toggles with `"blend": "ADD"` (exported as `"Blend": "Add"` in `.exp3.json`) for facial overlays (blush, tears, sweat, pale shadow) and independent accessories/arms so hotkeys in VTube Studio combine freely without overwriting each other.
 - Optionally add a short looping idle curve (e.g., `1.3s`, `0 → 1` loop) for continuous ambient shimmer (eye sparkle, tear glint, floating star ornament).
 - Place foreground arms and held props in an `arms_fg` layer group **after** `head/hair` so held items never clip behind side hair strands.
 - Tag non-face expression/FX/prop layers as `["object"]` (never `["face", "detail"]`) so `face/fitted` does not double-warp them; bind facial FX (`cheeks_flushed`, `pale`, `sweat`, `cry_tears`) directly to the face contour deformer (`顔デフォーマ`) and dial `expression.cheek` strength down to `~20`.

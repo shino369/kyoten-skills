@@ -291,8 +291,39 @@ def test_split_eyes_and_brows_front_three_quarter_and_warnings(tmp_path: Path):
     )
     assert set(res_cv.keys()) == {"eye_r", "eye_l", "brow_r", "brow_l"}
     assert res_cv["brow_r"][2]["top"] == 10.0 and res_cv["brow_r"][2]["height"] == 25.0
+    # r3-1: Above-brow dust speck must NOT be merged into eye_r!
+    assert res_cv["eye_r"][2]["top"] == 26.0 and res_cv["eye_r"][2]["height"] == 64.0
     assert res_cv["brow_l"][2]["top"] == 10.0
     assert warns_cv == []
+
+    # r3-2: Separate upper-lash/eyelid-crease beneath a curved brow arch stays in eye_r (not absorbed into brow_r)
+    arch_crease = np.zeros((120, 220, 4), dtype=np.uint8)
+    arch_crease[10:18, 20:52] = (40, 30, 30, 255)  # curved brow top
+    arch_crease[17:35, 49:62] = (40, 30, 30, 255)  # curved brow dipping tail
+    arch_crease[26:34, 22:46] = (20, 20, 20, 255)  # separate upper lash / crease under brow arch
+    arch_crease[40:89, 22:46] = (80, 90, 200, 255)  # iris
+    ac_src = tmp_path / "arch_crease.png"
+    Image.fromarray(arch_crease).save(ac_src)
+    warns_ac: list[str] = []
+    res_ac = lp.split_eyes_and_brows(
+        ac_src, out_parts, "ac", {"left": 0.0, "top": 0.0, "width": 220.0, "height": 120.0}, warnings=warns_ac
+    )
+    assert res_ac["brow_r"][2]["top"] == 10.0 and res_ac["brow_r"][2]["height"] == 25.0
+    assert res_ac["eye_r"][2]["top"] == 26.0 and res_ac["eye_r"][2]["height"] == 63.0
+    assert warns_ac == []
+
+    # r3-4: Closed-eye sprite where thick brow has larger area than thin closed eyelid still separates cleanly
+    closed_thin = np.zeros((100, 200, 4), dtype=np.uint8)
+    closed_thin[10:19, 20:70] = (40, 30, 30, 255)  # thick brow (area=450)
+    closed_thin[55:59, 25:70] = (20, 20, 20, 255)  # thin closed eyelid (area=180)
+    ct_src = tmp_path / "closed_thin.png"
+    Image.fromarray(closed_thin).save(ct_src)
+    warns_ct: list[str] = []
+    res_ct = lp.split_eyes_and_brows(
+        ct_src, out_parts, "ct", {"left": 0.0, "top": 0.0, "width": 200.0, "height": 100.0}, warnings=warns_ct
+    )
+    assert res_ct["brow_r"][2]["top"] == 10.0 and res_ct["eye_r"][2]["top"] == 55.0
+    assert warns_ct == []
 
     # Missing brow with warnings=None works cleanly without crashing
     res_nbl_nowarn = lp.split_eyes_and_brows(
@@ -1133,6 +1164,12 @@ def test_apply_post_rig_full_order_and_warnings():
             assert not sh["target"].startswith(("layer:", "deformer:"))
     kf_edits = [kw for t, kw in client.edits if t == "keyform_apply"]
     assert len(kf_edits) == 1 and len(kf_edits[0]["changes"]) == 1
+    # r3-3: Only PhysicsHdYaw (non-empty targets) invokes modifier_add; PhysicsNoTargets warns and is skipped
+    pm_edits = [kw for t, kw in client.edits if t == "modifier_add"]
+    assert len(pm_edits) == 1
+    assert pm_edits[0]["config"]["id"] == "PhysicsHdYaw"
+    assert len(pm_edits[0]["targets"]) == 2
+    assert any("PhysicsNoTargets" in w and "skipped" in w for w in summary["warnings"])
 
     tool_seq = [t for t, _ in client.edits]
     assert tool_seq.index("motion_put") < tool_seq.index("expression_put")

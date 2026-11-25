@@ -228,12 +228,26 @@ def split_eyes_and_brows(
     max_brow_h = int(h * brow_max_h_ratio)
     min_brow_gap = max(4, int(h * 0.04))
 
+    def _strictly_below_on_shared_x(upper_mask: np.ndarray, comp_mask: np.ndarray) -> bool:
+        shared = np.where(upper_mask.any(axis=0) & comp_mask.any(axis=0))[0]
+        if len(shared) == 0:
+            return False
+        return all(
+            int(np.where(comp_mask[:, x])[0].min()) > int(np.where(upper_mask[:, x])[0].max())
+            for x in shared
+        )
+
     for side, comps in by_side.items():
         if not comps:
             continue
-        main_eye = max(comps, key=lambda c: c["area"])
-        min_seed_area = max(min_px, int(main_eye["area"] * 0.015))
         comps_sorted = sorted(comps, key=lambda c: (c["y_min"], c["y_center"]))
+        largest = max(comps_sorted, key=lambda c: c["area"])
+        below_largest = [c for c in comps_sorted if c["y_min"] - largest["y_max"] >= min_brow_gap]
+        if largest is comps_sorted[0] and largest["height"] <= max_brow_h and below_largest:
+            main_eye = max(below_largest, key=lambda c: c["area"])
+        else:
+            main_eye = largest
+        min_seed_area = max(min_px, int(main_eye["area"] * 0.015))
         seed = next(
             (
                 c
@@ -256,9 +270,11 @@ def split_eyes_and_brows(
                 and c["y_max"] >= seed["y_min"] - 2
                 and c["y_min"] <= seed["y_max"] + 2
                 and c["y_max"] <= brow_band_max
+                and not _strictly_below_on_shared_x(seed["mask"], c["mask"])
             ]
         brow_ids = {id(c) for c in brow_group}
         rest = [c for c in comps_sorted if id(c) not in brow_ids]
+        eye_below: list[dict[str, Any]] = []
         gap_ok = False
         if brow_group:
             brow_mask = np.zeros((h, w), dtype=bool)
@@ -280,7 +296,7 @@ def split_eyes_and_brows(
         if gap_ok:
             for comp in brow_group:
                 buckets[f"brow_{side}"] |= comp["mask"]
-            for comp in rest:
+            for comp in eye_below:
                 buckets[f"eye_{side}"] |= comp["mask"]
         else:
             for comp in comps_sorted:
