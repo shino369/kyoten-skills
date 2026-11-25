@@ -1,11 +1,12 @@
 /**
  * Tests for verify_web.mjs (100% statement/branch/function/line coverage).
  */
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   MIME_TYPES,
   getErrorMessage,
@@ -426,4 +427,207 @@ describe('verify_web', () => {
     expect(code3).toBe(2);
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('ERROR'));
   });
+
+  test('patched viewer HTML drives stub P2LPlayer toggles, exclusive_group, and transitive requires (F8)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-viewer-int-'));
+    tempDirs.push(dir);
+    const scriptsDir = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '..'
+    );
+    const pyScript = path.join(scriptsDir, 'live2d_pipeline.py');
+    const cfgPath = path.join(dir, 'web_ui.json');
+    const htmlPath = path.join(dir, 'index.html');
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({
+        title: 'Stub <!--<script> Viewer',
+        prop_expression_ids: ['exp_hat_off', 'exp_book'],
+        toggles: [
+          {
+            id: 'hat_off',
+            label: 'Headdress OFF',
+            parameter: 'ParamHeaddress',
+            on_value: 0,
+            off_value: 1,
+          },
+          {
+            id: 'book',
+            label: 'Sketchbook',
+            parameter: 'ParamArmPose',
+            on_value: 3,
+            off_value: 0,
+            exclusive_group: 'arm',
+          },
+          {
+            id: 'book_text',
+            label: 'SketchText',
+            parameter: 'ParamSketchText',
+            on_value: 1,
+            off_value: 0,
+            requires: 'book',
+          },
+          {
+            id: 'sheep',
+            label: 'Sheep',
+            parameter: 'ParamArmPose',
+            on_value: 4,
+            off_value: 0,
+            exclusive_group: 'arm',
+          },
+        ],
+      })
+    );
+
+    execFileSync(
+      'uv',
+      [
+        'run',
+        '--quiet',
+        '--python',
+        '3.12',
+        '--with',
+        'pillow',
+        '--with',
+        'numpy',
+        '--with',
+        'scipy',
+        'python',
+        '-I',
+        pyScript,
+        'patch-web',
+        htmlPath,
+        '--config',
+        cfgPath,
+      ],
+      { stdio: 'pipe' }
+    );
+
+    const htmlText = fs.readFileSync(htmlPath, 'utf8');
+    // F11: inline JSON must escape HTML comment/script tokens
+    expect(htmlText).not.toContain('<!--<script>');
+    const scriptMatch = htmlText.match(
+      /<script type="module">([\s\S]*?)<\/script>/
+    );
+    expect(scriptMatch).not.toBeNull();
+
+    // Stub P2LPlayer module + minimal DOM harness to execute the generated module script for real
+    fs.writeFileSync(
+      path.join(dir, 'p2l.js'),
+      `
+export const calls = { params: [], exprs: [], clips: [], lookAt: [], lipSync: [], updated: 0 };
+export let createdPlayer = null;
+export class P2LPlayer {
+  static async create() {
+    createdPlayer = {
+      clips: ['Idle'],
+      expressions: ['exp_smile', 'exp_hat_off', 'exp_book'],
+      advancedFeatures: 0,
+      play(id) { calls.clips.push(id); },
+      expression(id) { calls.exprs.push(id); },
+      setParameter(k, v) { calls.params.push([k, v]); },
+      update() { calls.updated += 1; },
+      hitTest() { return null; },
+      lipSync(v) { calls.lipSync.push(v); },
+      lookAt(x, y) { calls.lookAt.push([x, y]); },
+    };
+    return createdPlayer;
+  }
+}
+`
+    );
+    const entryMjs = path.join(dir, 'viewer_module.mjs');
+    fs.writeFileSync(entryMjs, scriptMatch[1]);
+
+    // Minimal DOM implementing only what the generated viewer touches
+    const makeEl = (tag) => {
+      const attrs = {};
+      return {
+        tag,
+        options: [],
+        children: [],
+        textContent: '',
+        value: '',
+        hidden: false,
+        dataset: {},
+        add(opt) {
+          this.options.push(opt);
+        },
+        appendChild(ch) {
+          this.children.push(ch);
+        },
+        setAttribute(k, v) {
+          attrs[k] = String(v);
+        },
+        getAttribute(k) {
+          return attrs[k];
+        },
+        getBoundingClientRect() {
+          return { left: 0, top: 0, width: 100, height: 100 };
+        },
+      };
+    };
+    const byId = {
+      stage: makeEl('canvas'),
+      clip: makeEl('select'),
+      expression: makeEl('select'),
+      toggles: makeEl('div'),
+      mouth: makeEl('input'),
+      'advanced-label': makeEl('label'),
+      advanced: makeEl('input'),
+      hit: makeEl('span'),
+      error: makeEl('span'),
+    };
+    const fakeDoc = {
+      documentElement: { dataset: {} },
+      getElementById: (id) => byId[id],
+      createElement: (tag) => makeEl(tag),
+    };
+    const origDoc = globalThis.document;
+    const origOpt = globalThis.Option;
+    const origLoc = globalThis.location;
+    globalThis.document = fakeDoc;
+    globalThis.Option = function Option(text, value) {
+      return { text, value };
+    };
+    globalThis.location = { protocol: 'http:' };
+
+    try {
+      await import(`${pathToFileURL(entryMjs).href}?t=${Date.now()}`);
+      const stub = await import(pathToFileURL(path.join(dir, 'p2l.js')).href);
+
+      expect(fakeDoc.documentElement.dataset.p2lReady).toBe('1');
+      expect(byId.error.textContent).toBe('');
+      // prop_expression_ids filtered out of #expression dropdown
+      expect(byId.expression.options.map((o) => o.value)).toEqual([
+        'exp_smile',
+      ]);
+
+      const btnByLabel = Object.fromEntries(
+        byId.toggles.children.map((b) => [b.textContent, b])
+      );
+      // Clicking SketchText transitively enables Sketchbook (requires)
+      btnByLabel.SketchText.onclick();
+      expect(btnByLabel.Sketchbook.getAttribute('aria-pressed')).toBe('true');
+      expect(btnByLabel.SketchText.getAttribute('aria-pressed')).toBe('true');
+
+      // Clicking Sheep turns off Sketchbook (exclusive_group) AND cascades off SketchText (requires)!
+      btnByLabel.Sheep.onclick();
+      expect(btnByLabel.Sheep.getAttribute('aria-pressed')).toBe('true');
+      expect(btnByLabel.Sketchbook.getAttribute('aria-pressed')).toBe('false');
+      expect(btnByLabel.SketchText.getAttribute('aria-pressed')).toBe('false');
+
+      // player.update(dt) re-asserts parameter values every frame
+      stub.calls.params.length = 0;
+      stub.createdPlayer.update(1 / 60);
+      expect(stub.calls.updated).toBe(1);
+      expect(stub.calls.params).toContainEqual(['ParamArmPose', 4]);
+      expect(stub.calls.params).toContainEqual(['ParamHeaddress', 1]);
+      expect(stub.calls.params).toContainEqual(['ParamSketchText', 0]);
+    } finally {
+      globalThis.document = origDoc;
+      globalThis.Option = origOpt;
+      globalThis.location = origLoc;
+    }
+  }, 120_000);
 });

@@ -2,16 +2,34 @@
 
 ## Local Tooling Prerequisites
 
-1. **See-through** (local CUDA Python environment):
-   - Runs part decomposition at `1280` resolution producing layered `.psd` files.
-   - Outputs center-square-padded layers; invert padding with `unpad_params(orig_w, orig_h, psd.width)` and `map_bbox(...)` from `scripts/live2d_pipeline.py`.
-2. **PSD2Live Portable (3.8.4+)**:
-   - Directory containing `app/`, `mcp_proxy.py`, and bundled `runtime/bin/java[.exe]` (or system `java` on PATH).
-   - Point `scripts/live2d_pipeline.py run-p2l` at it via `--p2l-dir <path>` or the `PSD2LIVE_DIR` environment variable.
+1. **See-through** ([shitagaki-lab/see-through](https://github.com/shitagaki-lab/see-through), CUDA Python 3.12):
+   - Install PyTorch CUDA 12.8 (`torch==2.8.0+cu128`) and `pip install -r requirements.txt` inside the See-through repo; link/copy `common/assets` to `assets`.
+   - Model weights download automatically from HuggingFace:
+     - LayerDiff 3D: `layerdifforg/seethroughv0.0.2_layerdiff3d`
+     - Marigold Depth: `24yearsold/seethroughv0.0.1_marigold`
+     - SAM Body Parsing: `24yearsold/l2d_sam_iter2`
+   - Run from the See-through repository root:
+     ```bash
+     # 16 GB+ VRAM (bf16 at 1280px)
+     python inference/scripts/inference_psd.py --srcp path/to/char.png --save_to_psd
+     # 12 GB VRAM
+     python inference/scripts/inference_psd.py --srcp path/to/char.png --save_to_psd --group_offload
+     # 8 GB VRAM (NF4 quantized, requires requirements-inference-bnb.txt)
+     python inference/scripts/inference_psd_quantized.py --srcp path/to/char.png --save_to_psd
+     ```
+   - Outputs center-square-padded 1280² layers; invert padding back to native source dimensions with `unpad_params(orig_w, orig_h, psd.width)` and `map_bbox(...)` from `scripts/live2d_pipeline.py` (done automatically by `recover-single`).
+   - **macOS / Apple Silicon:** Upstream See-through expects CUDA (`bitsandbytes` / `cu128`) and MPS is unreliable; use a CUDA machine or the official HuggingFace Space / ModelScope demo (ask the user before uploading artwork).
+2. **PSD2Live 3.8.4+** ([tsunehimatoi/psd2live releases](https://github.com/tsunehimatoi/psd2live/releases)):
+   - Point `scripts/live2d_pipeline.py run-p2l` at it via `--p2l-dir <path>` or `PSD2LIVE_DIR`:
+     - **Windows portable:** `<dir>/app/`, `<dir>/runtime/bin/java.exe`, `<dir>/mcp_proxy.py`
+     - **macOS app bundle:** `/Applications/PSD2Live.app` or `/Applications/PSD2Live.app/Contents` (`Contents/app/`, `Contents/runtime/Contents/Home/bin/java`, `Contents/app/resources/mcp_proxy.py`)
+     - **Linux portable:** `<dir>/app/`, `<dir>/runtime/bin/java`, `<dir>/mcp_proxy.py` (or `<dir>/tools/mcp_proxy.py`)
+   - **Bearer token security note:** PSD2Live 3.8.4's `HeadlessMcp` CLI only accepts `--token <T>` as a process argument (no env-var flag). `run-p2l` generates a fresh random per-run token, uses an ephemeral localhost port (`--port 0`), verifies readiness with an authenticated JSON-RPC `initialize` probe, and redacts the token (`<REDACTED>`) from `_mcp_stdout.log` and `_mcp_stderr.log` on exit.
 
 ## `layout.json` (`psd2live-layout` v1)
 
 Painter order: **back to front** (first entry is drawn furthest back).
+Full semantic tag vocabulary: [PSD2Live `PSD_LAYER_SPEC.md#semantic-tags`](https://github.com/tsunehimatoi/psd2live/blob/main/docs/en/spec/PSD_LAYER_SPEC.md#semantic-tags).
 
 ```json
 {
@@ -69,14 +87,14 @@ Variant modes:
 4. `parameter_defaults` (name & default only) — set defaults before axes without clamping min/max yet.
 5. `bind_to_deformer` — `object_edit_appearance` (`action: "bind"`, `space: "canvas"`). Avoid binding custom meshes to `DeformEyeShapeL/R` directly (can invalidate `eye/fitted`); bind facial overlays to the face contour deformer (`顔デフォーマ`) and headwear to the head container (`頭部コンテナ`).
 6. `create_warps` — `rig_create_warp`.
-7. **Phase A `author_axes`** — axes on non-clamped parameters (`ParamEyeShape`, `ParamHdYaw`, `ParamHdPitch`).
+7. **Phase A `author_axes`** — axes on non-clamped parameters whose targets exist before `canvas_warps` (`ParamEyeShape`, `ParamHdYaw`, `ParamHdPitch`, `ParamEyeBounce`).
 8. `keyform_applies` — batched in chunks of **30** changes per `keyform_apply` call (e.g., 2D opacity gates on `eye_close_l/r`).
 9. `motion_scale` — scales `Idle` / `Nod` / `Shake` curves and Bezier `in`/`out` handles **before** parameter range clamps, because `motion_put` rejects out-of-range keys once a parameter is clamped.
 10. `expressions` (`expression_put`) — applied **before** `canvas_warps`, because `canvas_warp` bakes modifier-owned expression parameters.
 11. `parameter_defaults` (`min` / `max` range clamps) — clamps `ParamAngleX/Y/Z` cleanly after motions and expressions are updated.
 12. `canvas_warps` — user-owned canvas warp deformers.
-13. **Phase B `author_axes`** — axes on clamped parameters (if any).
-14. `physics_modifiers` — `modifier_add` (`type: "physics"`) linking head angles to custom 3D parallax parameters (`ParamAngleX -> ParamHdYaw`, `ParamAngleY -> ParamHdPitch`).
+13. **Phase B `author_axes`** — axes on clamped parameters **and** any axis targeting a deformer created by `canvas_warps` (so custom parameters like `ParamHdYaw` can safely deform a `canvas_warp` deformer).
+14. `physics_modifiers` — `modifier_add` (`type: "physics"`) linking head angles or eye blink to custom parameters (`ParamAngleX -> ParamHdYaw`, `ParamAngleY -> ParamHdPitch`, `ParamEyeLOpen/ROpen -> ParamEyeBounce`).
 15. `swings` — `swing_put` pendulum physics for ribbons, hair ornaments, and accessories.
 
 Target reference prefixes resolved automatically in `post_rig.json`:
@@ -84,7 +102,135 @@ Target reference prefixes resolved automatically in `post_rig.json`:
 - `"layer:<layer_id>"` → resolves via `workspace_inspect` `layerId` to `"mesh:<id>"`.
 - `"deformer:<deformer_name>"` → resolves via `workspace_overview` deformer names (note: PSD2Live default deformer names may be Japanese such as `頭部コンテナ`, `顔デフォーマ`, `両目`; inspect `overview.json` after an initial run to confirm exact names for your locale/preset).
 
-## Export Targets & Validation
+## Concrete JSON Schema Examples
+
+### `expressions.json` (`expression_put`)
+
+Use `"blend": "add"` for single-parameter facial FX and prop toggles so multiple expressions stack cleanly in VTube Studio:
+
+```json
+[
+  {
+    "id": "exp_smile",
+    "name": "Smile",
+    "entries": [
+      { "parameter": "ParamEyeExpr", "value": 1.0, "blend": "overwrite" },
+      { "parameter": "ParamMouthForm", "value": 1.0, "blend": "overwrite" },
+      { "parameter": "ParamCheek", "value": 0.4, "blend": "add" }
+    ]
+  },
+  {
+    "id": "exp_tears",
+    "name": "Tears",
+    "entries": [{ "parameter": "ParamTears", "value": 1.0, "blend": "add" }]
+  }
+]
+```
+
+### `author_axes` (custom eye shape / 3D headwear parallax)
+
+```json
+"author_axes": [
+  {
+    "summary": "Eye shape expression deformations",
+    "parameter": { "id": "ParamEyeShape", "name": "Eye Shape", "min": -1.0, "max": 2.0, "default": 0.0 },
+    "shapes": [
+      {
+        "target": "deformer:両目",
+        "value": -1.0,
+        "operations": [{ "kind": "scale", "x": 1.0, "y": 0.85 }]
+      },
+      {
+        "target": "deformer:両目",
+        "value": 2.0,
+        "operations": [{ "kind": "scale", "x": 1.04, "y": 1.15 }]
+      }
+    ]
+  },
+  {
+    "summary": "3D headwear yaw parallax",
+    "parameter": { "id": "ParamHdYaw", "name": "Headwear Yaw", "min": -1.0, "max": 1.0, "default": 0.0 },
+    "shapes": [
+      {
+        "target": "layer:headwear_inner",
+        "value": -1.0,
+        "operations": [{ "kind": "translate", "x": -0.025, "y": 0.0 }]
+      },
+      {
+        "target": "layer:headwear_outer",
+        "value": -1.0,
+        "operations": [{ "kind": "translate", "x": -0.012, "y": 0.0 }]
+      }
+    ]
+  }
+]
+```
+
+### `keyform_applies` (2D blink-immunity opacity gate)
+
+```json
+"keyform_applies": [
+  {
+    "op": "set",
+    "target": "layer:eye_close_l",
+    "key": { "ParamEyeLOpen": 0.0, "ParamEyeExpr": 0.0 },
+    "channels": { "opacity": 1.0 }
+  },
+  {
+    "op": "set",
+    "target": "layer:eye_close_l",
+    "key": { "ParamEyeLOpen": 0.0, "ParamEyeExpr": 1.0 },
+    "channels": { "opacity": 0.0 }
+  },
+  {
+    "op": "set",
+    "target": "layer:eye_close_l",
+    "key": { "ParamEyeLOpen": 1.0, "ParamEyeExpr": 0.0 },
+    "channels": { "opacity": 0.0 }
+  },
+  {
+    "op": "set",
+    "target": "layer:eye_close_l",
+    "key": { "ParamEyeLOpen": 1.0, "ParamEyeExpr": 1.0 },
+    "channels": { "opacity": 0.0 }
+  }
+]
+```
+
+### `canvas_warps` (user-owned warp deformer)
+
+```json
+"canvas_warps": [
+  {
+    "id": "warp_headwear_3d",
+    "name": "Headwear 3D Warp",
+    "layer_ids": ["headwear_outer", "headwear_inner"],
+    "parent_deformer": "頭部コンテナ",
+    "rows": 3,
+    "columns": 5
+  }
+]
+```
+
+### `swings` (`swing_put` pendulum accessories)
+
+```json
+"swings": [
+  {
+    "id": "swing_ribbon_r",
+    "name": "Right Ribbon Swing",
+    "layer_id": "headwear_ribbon_r",
+    "fulcrum": "top",
+    "preset": "accessory",
+    "motions": [
+      { "kind": "lateral", "amplitude": 0.10 },
+      { "kind": "vertical", "amplitude": 0.03 }
+    ]
+  }
+]
+```
+
+## Export Targets, Losses & Validation
 
 `run-p2l` exports four targets in one session:
 
@@ -93,7 +239,13 @@ Target reference prefixes resolved automatically in `post_rig.json`:
 - `export_web/` — standalone WASM/WebGL viewer (`index.html`, `p2l.js`, `p2l_runtime.wasm`, `layout.p2lrt`).
 - `export_gif/` — quick 512px 15fps animated preview.
 
-`validate_moc3_dir()` checks:
+`run-p2l` and `validate_moc3_dir()` enforce:
 
-- `*.moc3` starts with ASCII magic `"MOC3"` and valid Cubism version (`1..6`).
-- `*.model3.json` lists textures, physics, expressions, motions, and `EyeBlink` / `LipSync` groups.
+- `*.moc3` starts with ASCII magic `"MOC3"`, valid Cubism version (`1..6`), and size `>= 64` bytes.
+- `*.model3.json` parses cleanly, declares `FileReferences.Moc`, and **every referenced file** (`Moc`, `Textures`, `Physics`, `DisplayInfo`, `Expressions`, `Motions`) exists inside the export directory.
+- `Groups` checks whether `EyeBlink` and `LipSync` exist and have non-empty `Ids` (reported in `warnings`).
+- `physics3.json` parses cleanly and its output `Destination.Id` values are cross-checked against the `.moc3` parameter ID table (flagging `physics_unmatched_outputs` in `warnings`).
+- `export_vtube-studio/` must also include `*.vtube.json`.
+- `export_losses` summarizes `handling: "dropped"` and `handling: "approximated"` entries from `exports.*.result.losses`. Any `dropped` loss fails `run-p2l` with exit code `1` unless `--allow-export-losses` is explicitly passed.
+
+> **Known PSD2Live 3.8.4 upstream issue (`IdTruncated`):** PSD2Live 3.8.4's auto-generated internal modifier IDs (hex-encoded `modifier:m1:...` and `modifier:m6:...`) exceed Cubism's 64-byte record width. PSD2Live truncates & disambiguates them in `.moc3` (logging `IdTruncated` as `handling: "dropped"`), while `layout.physics3.json` retains the untruncated IDs—disconnecting auto-generated hair chain physics in Cubism/VTS unless fixed upstream or replaced with short-ID `physics_modifiers` / `swings`. `validate_moc3_dir()` surfaces these exact unmatched IDs in `physics_unmatched_outputs`.

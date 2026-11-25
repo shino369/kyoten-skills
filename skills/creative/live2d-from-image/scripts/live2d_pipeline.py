@@ -4,14 +4,15 @@
 Subcommands (run with uv, nothing installed globally):
   recover-single  Build a Case 2B psd2live-layout manifest from a transparent
                   illustration + See-through PSD (with native-pixel
-                  re-projection and alpha-residual headwear/footwear recovery).
+                  re-projection at full source resolution and alpha-residual
+                  headwear/footwear recovery).
   split-eyes      Split a bilateral eye/brow PNG into right/left eye & brow PNGs.
   run-p2l         Run PSD2Live headless MCP: import layout/PSD -> rig ->
                   ordered post_rig recipe -> expressions -> pose sheets ->
-                  export moc3/vtube-studio/web/gif -> validate MOC3.
+                  export moc3/vtube-studio/web/gif -> validate exports & losses.
   patch-web       Upgrade export_web/index.html with independent ON/OFF
                   prop/pose toggles combinable with any facial expression.
-  validate-moc3   Inspect *.moc3 header and *.model3.json references.
+  validate-moc3   Inspect *.moc3 header, *.model3.json references, and physics3.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ import os
 import re
 import secrets
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -70,6 +73,8 @@ DEFAULT_EXPORT_TARGETS: tuple[tuple[str, dict[str, str]], ...] = (
     ("web", {}),
     ("gif", {"size": "512", "fps": "15"}),
 )
+
+REQUIRED_MODEL3_GROUPS: tuple[str, ...] = ("EyeBlink", "LipSync")
 
 
 # ---------- Coordinate mapping & native-pixel re-projection ----------
@@ -172,10 +177,15 @@ def split_eyes_and_brows(
     *,
     alpha_threshold: int = 8,
     min_px: int = 10,
-    brow_max_y_ratio: float = 0.36,
     brow_max_h_ratio: float = 0.30,
+    warnings: list[str] | None = None,
 ) -> dict[str, tuple[Path, tuple[int, int], dict[str, float]]]:
     """Split a bilateral eye PNG into character right/left eyes and right/left brows.
+
+    Uses per-side relative geometry (picking thin components strictly above each
+    side's eye anchor) so three-quarter views with slanted brow heights classify
+    accurately. Appends a warning to ``warnings`` whenever a side has an eye
+    without a detected brow.
 
     Character's right = viewer's left (x < mid_x).
     Character's left  = viewer's right (x >= mid_x).
@@ -188,26 +198,59 @@ def split_eyes_and_brows(
     alpha = arr[:, :, 3] > alpha_threshold
     labeled, n = ndimage.label(alpha)
 
+    by_side: dict[str, list[dict[str, Any]]] = {"r": [], "l": []}
+    for i in range(1, n + 1):
+        mask = labeled == i
+        ys, xs = np.where(mask)
+        area = len(xs)
+        if area < min_px:
+            continue
+        cx = float(xs.mean())
+        y_min, y_max = int(ys.min()), int(ys.max())
+        side = "r" if cx < mid_x else "l"
+        by_side[side].append(
+            {
+                "mask": mask,
+                "area": area,
+                "y_min": y_min,
+                "y_max": y_max,
+                "y_center": 0.5 * (y_min + y_max),
+                "height": y_max - y_min + 1,
+            }
+        )
+
     buckets: dict[str, np.ndarray] = {
         "eye_r": np.zeros((h, w), dtype=bool),
         "eye_l": np.zeros((h, w), dtype=bool),
         "brow_r": np.zeros((h, w), dtype=bool),
         "brow_l": np.zeros((h, w), dtype=bool),
     }
+    max_brow_h = int(h * brow_max_h_ratio)
 
-    for i in range(1, n + 1):
-        mask = labeled == i
-        ys, xs = np.where(mask)
-        if len(xs) < min_px:
+    min_brow_gap = max(4, int(h * 0.04))
+    for side, comps in by_side.items():
+        if not comps:
             continue
-        cx = float(xs.mean())
-        y_max = int(ys.max())
-        y_min = int(ys.min())
-        side = "r" if cx < mid_x else "l"
-        if y_max < int(h * brow_max_y_ratio) and (y_max - y_min) < int(h * brow_max_h_ratio):
-            buckets[f"brow_{side}"] |= mask
+        comps_sorted = sorted(comps, key=lambda c: (c["y_min"], c["y_center"]))
+        top = comps_sorted[0]
+        brow_band_max = top["y_max"] + max(4, top["height"])
+        brow_group = [
+            c
+            for c in comps_sorted
+            if c["height"] <= max_brow_h and c["y_min"] <= top["y_max"] + 2 and c["y_max"] <= brow_band_max
+        ]
+        brow_ids = {id(c) for c in brow_group}
+        rest = [c for c in comps_sorted if id(c) not in brow_ids]
+        if brow_group and rest and (min(c["y_min"] for c in rest) - max(c["y_max"] for c in brow_group)) >= min_brow_gap:
+            for comp in brow_group:
+                buckets[f"brow_{side}"] |= comp["mask"]
+            for comp in rest:
+                buckets[f"eye_{side}"] |= comp["mask"]
         else:
-            buckets[f"eye_{side}"] |= mask
+            for comp in comps_sorted:
+                buckets[f"eye_{side}"] |= comp["mask"]
+            if warnings is not None:
+                warnings.append(f"No separate brow component detected on side '{side}'")
 
     results: dict[str, tuple[Path, tuple[int, int], dict[str, float]]] = {}
     sx = rect["width"] / w
@@ -260,7 +303,7 @@ def build_single_image_layout(
     tag_map: Mapping[str, list[str]] = DEFAULT_SEETHROUGH_TAG_MAP,
     psd_loader: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a psd2live-layout manifest from a transparent PNG + See-through PSD."""
+    """Build a native-resolution psd2live-layout manifest from PNG + See-through PSD."""
     out_dir.mkdir(parents=True, exist_ok=True)
     out_parts = out_dir / "parts"
     out_parts.mkdir(parents=True, exist_ok=True)
@@ -271,32 +314,26 @@ def build_single_image_layout(
 
     orig = Image.open(src_rgba).convert("RGBA")
     ow, oh = orig.size
-    scale, pad_x_f, pad_y_f = unpad_params(ow, oh, res)
-    nw, nh = int(round(ow * scale)), int(round(oh * scale))
-    pad_x, pad_y = int(pad_x_f), int(pad_y_f)
-    orig_sq = Image.new("RGBA", (res, res), (0, 0, 0, 0))
-    orig_sq.alpha_composite(orig.resize((nw, nh), Image.Resampling.LANCZOS), (pad_x, pad_y))
-    orig_arr = np.array(orig_sq)
+    orig_arr = np.array(orig)
+    scale, pad_x, pad_y = unpad_params(ow, oh, res)
 
     raw_layers: list[tuple[int, str, tuple[int, int, int, int], np.ndarray]] = []
-    cov = np.zeros((res, res), dtype=np.uint8)
+    cov = np.zeros((oh, ow), dtype=np.uint8)
     for idx, layer in enumerate(psd):
         im = layer.composite()
         if im is None:
             continue
-        x0, y0, x1, y1 = layer.bbox
-        sx0, sy0 = max(0, -x0), max(0, -y0)
-        dx0, dy0 = max(0, x0), max(0, y0)
-        dx1, dy1 = min(res, x1), min(res, y1)
-        if dx1 <= dx0 or dy1 <= dy0:
+        native_rect = map_bbox(layer.bbox, scale, pad_x, pad_y)
+        try:
+            arr, box = paste_onto_canvas(im, native_rect, ow, oh)
+        except ValueError:
             continue
-        arr_full = np.array(im.convert("RGBA"))
-        arr = arr_full[sy0 : sy0 + (dy1 - dy0), sx0 : sx0 + (dx1 - dx0)].copy()
+        dx0, dy0, dx1, dy1 = box
         cov[dy0:dy1, dx0:dx1] = np.maximum(cov[dy0:dy1, dx0:dx1], arr[:, :, 3])
-        raw_layers.append((idx, layer.name, (dx0, dy0, dx1, dy1), arr))
+        raw_layers.append((idx, layer.name, box, arr))
 
     if reproject:
-        occ = np.zeros((res, res), dtype=bool)
+        occ = np.zeros((oh, ow), dtype=bool)
         reprojected: list[tuple[int, str, tuple[int, int, int, int], np.ndarray]] = []
         for idx, lname, box, arr in reversed(raw_layers):
             out_arr = reproject_visible_pixels(arr, box, orig_arr, occ)
@@ -350,10 +387,10 @@ def build_single_image_layout(
         rect = {"left": float(x0), "top": float(y0), "width": float(x1 - x0), "height": float(y1 - y0)}
         return p, (x1 - x0, y1 - y0), rect
 
-    top_zone = np.zeros((res, res), dtype=bool)
-    top_zone[pad_y : pad_y + int(nh * top_zone_ratio), :] = True
-    bot_zone = np.zeros((res, res), dtype=bool)
-    bot_zone[pad_y + int(nh * (1.0 - bottom_zone_ratio)) : pad_y + nh, :] = True
+    top_zone = np.zeros((oh, ow), dtype=bool)
+    top_zone[: int(oh * top_zone_ratio), :] = True
+    bot_zone = np.zeros((oh, ow), dtype=bool)
+    bot_zone[int(oh * (1.0 - bottom_zone_ratio)) :, :] = True
 
     shoes_rec = extract_zone(bot_zone, "shoes_recovered.png", min_px=min_bottom_px)
     hat_rec = extract_zone(top_zone, "hat_recovered.png", min_px=min_top_px)
@@ -392,7 +429,7 @@ def build_single_image_layout(
         "format": "psd2live-layout",
         "version": 1,
         "name": name,
-        "canvas": {"width": res, "height": res},
+        "canvas": {"width": ow, "height": oh},
         "layers": layers,
     }
     (out_dir / "layout.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -405,7 +442,12 @@ def build_single_image_layout(
 def build_web_viewer_html(web_ui: Mapping[str, Any]) -> str:
     """Build export_web/index.html with independent ON/OFF prop/pose toggles."""
     title = html.escape(str(web_ui.get("title", "Live2D Viewer")))
-    cfg_json = json.dumps(dict(web_ui), ensure_ascii=False).replace("</", "<\\/")
+    cfg_json = (
+        json.dumps(dict(web_ui), ensure_ascii=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -567,14 +609,56 @@ def patch_web_viewer(index_path: Path, web_ui: Mapping[str, Any]) -> Path:
     return index_path
 
 
-def validate_moc3_dir(moc3_dir: Path) -> dict[str, Any]:
-    """Validate *.moc3 binary header and *.model3.json references in moc3_dir."""
-    result: dict[str, Any] = {"dir": str(moc3_dir), "files": [], "moc3": None, "model3": None}
+def _as_dict(val: Any) -> dict[str, Any]:
+    return val if isinstance(val, dict) else {}
+
+
+def _as_list(val: Any) -> list[Any]:
+    return val if isinstance(val, list) else []
+
+
+def _extract_moc3_param_ids(raw: bytes) -> set[str] | None:
+    """Extract 64-byte ASCII parameter IDs from a Cubism MOC3 binary when tables are present."""
+    if len(raw) < 64 + 80 * 4:
+        return None
+    fmt = ">I" if raw[5] else "<I"
+    count_off = struct.unpack_from(fmt, raw, 64)[0]
+    p_off = struct.unpack_from(fmt, raw, 64 + 50 * 4)[0]
+    if count_off + 24 > len(raw):
+        return None
+    n_params = struct.unpack_from(fmt, raw, count_off + 20)[0]
+    if p_off == 0 or p_off + n_params * 64 > len(raw):
+        return None
+    return {
+        raw[p_off + i * 64 : p_off + (i + 1) * 64].split(b"\x00", 1)[0].decode("ascii", errors="replace")
+        for i in range(n_params)
+    }
+
+
+def validate_moc3_dir(moc3_dir: Path, *, require_vtube_json: bool = False) -> dict[str, Any]:
+    """Validate *.moc3 header, *.model3.json references, groups, and physics3 consistency."""
+    issues: list[str] = []
+    warnings: list[str] = []
+    result: dict[str, Any] = {
+        "dir": str(moc3_dir),
+        "ok": False,
+        "files": [],
+        "moc3": None,
+        "model3": None,
+        "physics_unmatched_outputs": [],
+        "issues": issues,
+        "warnings": warnings,
+    }
     if not moc3_dir.is_dir():
         result["error"] = "directory missing"
+        issues.append("directory missing")
         return result
+
+    root_resolved = moc3_dir.resolve()
     files = sorted(p.relative_to(moc3_dir).as_posix() for p in moc3_dir.rglob("*") if p.is_file())
     result["files"] = files
+
+    moc_param_ids: set[str] | None = None
     moc_files = sorted(moc3_dir.rglob("*.moc3"))
     if moc_files:
         moc_path = moc_files[0]
@@ -582,37 +666,171 @@ def validate_moc3_dir(moc3_dir: Path) -> dict[str, Any]:
         magic = raw[:4].decode("ascii", errors="replace")
         ver = raw[4] if len(raw) > 4 else None
         is_big_endian = raw[5] if len(raw) > 5 else None
+        header_ok = magic == "MOC3" and ver in (1, 2, 3, 4, 5, 6) and len(raw) >= 64
         result["moc3"] = {
             "path": moc_path.relative_to(moc3_dir).as_posix(),
             "bytes": len(raw),
             "magic": magic,
             "version": ver,
             "big_endian": bool(is_big_endian),
-            "header_ok": magic == "MOC3" and ver in (1, 2, 3, 4, 5, 6),
+            "header_ok": header_ok,
         }
+        if not header_ok:
+            issues.append(f"invalid .moc3 header or truncated file ({len(raw)} bytes)")
+        else:
+            moc_param_ids = _extract_moc3_param_ids(raw)
+    else:
+        issues.append("missing .moc3 file")
+
     m3_files = sorted(moc3_dir.rglob("*.model3.json"))
-    if m3_files:
-        m3 = json.loads(m3_files[0].read_text(encoding="utf-8"))
-        refs = m3.get("FileReferences", {})
-        result["model3"] = {
-            "path": m3_files[0].relative_to(moc3_dir).as_posix(),
-            "version": m3.get("Version"),
-            "moc": refs.get("Moc"),
-            "textures": refs.get("Textures", []),
-            "physics": refs.get("Physics"),
-            "display_info": refs.get("DisplayInfo"),
-            "expressions": [e.get("Name") for e in refs.get("Expressions", [])],
-            "motions": {k: len(v) for k, v in refs.get("Motions", {}).items()},
-            "groups": [g.get("Name") for g in m3.get("Groups", [])],
-        }
+    if not m3_files:
+        issues.append("missing .model3.json file")
+    else:
+        m3_path = m3_files[0]
+        try:
+            m3 = json.loads(m3_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError) as exc:
+            issues.append(f"invalid .model3.json: {exc}")
+            m3 = None
+        else:
+            if not isinstance(m3, dict):
+                issues.append("invalid .model3.json: expected JSON object")
+                m3 = None
+
+        if m3 is not None:
+            refs = _as_dict(m3.get("FileReferences"))
+            referenced: list[str] = []
+            moc_ref = refs.get("Moc")
+            if isinstance(moc_ref, str) and moc_ref:
+                referenced.append(moc_ref)
+            else:
+                issues.append("model3.json missing FileReferences.Moc")
+            textures = [t for t in _as_list(refs.get("Textures")) if isinstance(t, str)]
+            referenced.extend(textures)
+            for opt_key in ("Physics", "DisplayInfo"):
+                opt_val = refs.get(opt_key)
+                if isinstance(opt_val, str) and opt_val:
+                    referenced.append(opt_val)
+            expr_entries = [e for e in _as_list(refs.get("Expressions")) if isinstance(e, dict)]
+            for ex in expr_entries:
+                ex_file = ex.get("File")
+                if isinstance(ex_file, str) and ex_file:
+                    referenced.append(ex_file)
+            motions_map = _as_dict(refs.get("Motions"))
+            motions_counts: dict[str, int] = {}
+            for mgroup, raw_mlist in motions_map.items():
+                mlist = [mt for mt in _as_list(raw_mlist) if isinstance(mt, dict)]
+                motions_counts[str(mgroup)] = len(mlist)
+                for mt in mlist:
+                    mt_file = mt.get("File")
+                    if isinstance(mt_file, str) and mt_file:
+                        referenced.append(mt_file)
+
+            missing_files: list[str] = []
+            for rel_ref in referenced:
+                cand = (m3_path.parent / rel_ref).resolve()
+                if not cand.is_relative_to(root_resolved) or not cand.is_file():
+                    missing_files.append(rel_ref)
+            if missing_files:
+                issues.append(f"model3.json missing referenced files: {', '.join(missing_files)}")
+
+            groups_map = {
+                g["Name"]: _as_list(g.get("Ids"))
+                for g in _as_list(m3.get("Groups"))
+                if isinstance(g, dict) and isinstance(g.get("Name"), str) and g["Name"]
+            }
+            missing_groups = [g for g in REQUIRED_MODEL3_GROUPS if g not in groups_map]
+            empty_groups = [g for g in REQUIRED_MODEL3_GROUPS if g in groups_map and not groups_map[g]]
+            if missing_groups:
+                warnings.append(f"model3.json missing groups: {', '.join(missing_groups)}")
+            if empty_groups:
+                warnings.append(f"model3.json empty groups: {', '.join(empty_groups)}")
+
+            result["model3"] = {
+                "path": m3_path.relative_to(moc3_dir).as_posix(),
+                "version": m3.get("Version"),
+                "moc": moc_ref if isinstance(moc_ref, str) else None,
+                "textures": textures,
+                "physics": refs.get("Physics") if isinstance(refs.get("Physics"), str) else None,
+                "display_info": refs.get("DisplayInfo") if isinstance(refs.get("DisplayInfo"), str) else None,
+                "expressions": [e.get("Name") for e in expr_entries],
+                "motions": motions_counts,
+                "groups": list(groups_map.keys()),
+                "missing_files": missing_files,
+                "missing_groups": missing_groups,
+                "empty_groups": empty_groups,
+            }
+
+            phys_ref = refs.get("Physics")
+            if isinstance(phys_ref, str) and phys_ref and phys_ref not in missing_files:
+                phys_path = (m3_path.parent / phys_ref).resolve()
+                try:
+                    phys_data = json.loads(phys_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, ValueError) as exc:
+                    issues.append(f"invalid physics3.json: {exc}")
+                    phys_data = None
+                else:
+                    if not isinstance(phys_data, dict):
+                        issues.append("invalid physics3.json: expected JSON object")
+                        phys_data = None
+                if phys_data is not None and moc_param_ids is not None:
+                    unmatched: list[str] = []
+                    for ps in _as_list(phys_data.get("PhysicsSettings")):
+                        for out in _as_list(_as_dict(ps).get("Output")):
+                            pid = _as_dict(_as_dict(out).get("Destination")).get("Id")
+                            if not isinstance(pid, str):
+                                issues.append("physics3.json output entry missing Destination.Id")
+                            elif pid not in moc_param_ids:
+                                unmatched.append(pid)
+                    result["physics_unmatched_outputs"] = unmatched
+                    if unmatched:
+                        warnings.append(
+                            f"physics3.json has {len(unmatched)} output parameter ID(s) not present in .moc3"
+                        )
+
+    if require_vtube_json:
+        vts_files = [f for f in files if f.endswith(".vtube.json")]
+        result["vtube_json"] = vts_files[0] if vts_files else None
+        if not vts_files:
+            issues.append("missing .vtube.json file")
+
+    result["ok"] = len(issues) == 0
     return result
+
+
+def summarize_export_losses(export_results: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarize dropped and approximated compiler losses reported by PSD2Live exports."""
+    total_dropped = 0
+    total_approximated = 0
+    by_target: dict[str, dict[str, Any]] = {}
+    for target, info in export_results.items():
+        if not info.get("ok"):
+            continue
+        res = info.get("result")
+        losses = res.get("losses", []) if isinstance(res, Mapping) else []
+        dropped_items = [item for item in losses if isinstance(item, Mapping) and item.get("handling") == "dropped"]
+        approx_count = sum(
+            1 for item in losses if isinstance(item, Mapping) and item.get("handling") == "approximated"
+        )
+        total_dropped += len(dropped_items)
+        total_approximated += approx_count
+        by_target[target] = {
+            "dropped": len(dropped_items),
+            "approximated": approx_count,
+            "dropped_items": dropped_items,
+        }
+    return {
+        "total_dropped": total_dropped,
+        "total_approximated": total_approximated,
+        "by_target": by_target,
+    }
 
 
 # ---------- PSD2Live Headless MCP Runner ----------
 
 
 def discover_p2l_dir(explicit: Path | None = None, env: Mapping[str, str] | None = None) -> Path:
-    """Resolve PSD2Live portable directory from --p2l-dir or PSD2LIVE_DIR env var."""
+    """Resolve PSD2Live directory from --p2l-dir or PSD2LIVE_DIR (supports macOS .app bundles)."""
     env_map = os.environ if env is None else env
     raw = explicit if explicit is not None else (Path(env_map["PSD2LIVE_DIR"]) if env_map.get("PSD2LIVE_DIR") else None)
     if raw is None:
@@ -620,9 +838,22 @@ def discover_p2l_dir(explicit: Path | None = None, env: Mapping[str, str] | None
             "PSD2Live directory not configured. Pass --p2l-dir <path> or set PSD2LIVE_DIR."
         )
     resolved = raw.resolve()
+    if (resolved / "Contents" / "app").is_dir():
+        return resolved / "Contents"
     if not (resolved / "app").is_dir():
         raise FileNotFoundError(f"PSD2Live app directory missing under {resolved}")
     return resolved
+
+
+def find_mcp_proxy_dir(p2l_dir: Path) -> Path:
+    """Locate the directory containing mcp_proxy.py across Windows, macOS, and Linux layouts."""
+    candidates = (p2l_dir, p2l_dir / "app" / "resources", p2l_dir / "tools")
+    for cand in candidates:
+        if (cand / "mcp_proxy.py").is_file():
+            return cand
+    raise FileNotFoundError(
+        f"mcp_proxy.py not found under {p2l_dir} (checked root, app/resources, tools)"
+    )
 
 
 def build_p2l_mcp_cmd(
@@ -635,14 +866,12 @@ def build_p2l_mcp_cmd(
 ) -> list[str]:
     """Build cross-platform Java command line for PSD2Live headless MCP server."""
     app_dir = p2l_dir / "app"
-    win_java = p2l_dir / "runtime" / "bin" / "java.exe"
-    posix_java = p2l_dir / "runtime" / "bin" / "java"
-    if win_java.exists():
-        java_exe = str(win_java)
-    elif posix_java.exists():
-        java_exe = str(posix_java)
-    else:
-        java_exe = "java"
+    java_candidates = (
+        p2l_dir / "runtime" / "bin" / "java.exe",
+        p2l_dir / "runtime" / "bin" / "java",
+        p2l_dir / "runtime" / "Contents" / "Home" / "bin" / "java",
+    )
+    java_exe = next((str(p) for p in java_candidates if p.exists()), "java")
     return [
         java_exe,
         f"-Djpackage.app-version={app_version}",
@@ -662,35 +891,74 @@ def build_p2l_mcp_cmd(
     ]
 
 
+def pick_ephemeral_port() -> int:
+    """Return an unused localhost TCP port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def redact_token_in_file(path: Path, token: str) -> None:
+    """Replace occurrences of bearer token in a log file with <REDACTED>."""
+    if not token or not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if token in text:
+        path.write_text(text.replace(token, "<REDACTED>"), encoding="utf-8")
+
+
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+
+
 def wait_for_mcp(
     port: int,
     proc: Any,
     timeout: float = 30.0,
     *,
-    opener: Callable[..., Any] = urllib.request.urlopen,
+    token: str = "",
+    opener: Callable[..., Any] = _NO_PROXY_OPENER,
     sleep_fn: Callable[[float], None] = time.sleep,
     time_fn: Callable[[], float] = time.time,
 ) -> None:
-    """Poll local PSD2Live MCP endpoint until HTTP responds or timeout expires."""
+    """Poll local PSD2Live MCP endpoint with an authenticated JSON-RPC probe."""
     deadline = time_fn() + timeout
     url = f"http://127.0.0.1:{port}/mcp"
+    probe_body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "live2d-pipeline-probe", "version": "1"},
+            },
+        }
+    ).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
     while time_fn() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"PSD2Live MCP exited early with code {proc.returncode}")
+        req = urllib.request.Request(url, data=probe_body, headers=headers, method="POST")
         try:
-            opener(url, timeout=1.0)
-            return
-        except urllib.error.HTTPError:
-            return
+            with opener(req, timeout=1.0) as resp:
+                raw_body = resp.read()
+            if b"jsonrpc" in raw_body:
+                return
         except Exception:
-            sleep_fn(0.4)
+            pass
+        sleep_fn(0.4)
     raise TimeoutError(f"PSD2Live MCP did not start on port {port} within {timeout}s")
 
 
 def _default_client_factory(p2l_dir: Path, endpoint: str, token: str) -> Any:
-    p2l_str = str(p2l_dir)
-    if p2l_str not in sys.path:
-        sys.path.insert(0, p2l_str)
+    proxy_dir = str(find_mcp_proxy_dir(p2l_dir))
+    if proxy_dir not in sys.path:
+        sys.path.insert(0, proxy_dir)
     mcp_proxy = importlib.import_module("mcp_proxy")
     return mcp_proxy.Client(endpoint=endpoint, token=token, timeout=300.0)
 
@@ -844,8 +1112,20 @@ def apply_post_rig(
             shapes=shapes,
         )
 
+    canvas_warp_names = {cw["id"] for cw in recipe.get("canvas_warps", [])} | {
+        cw.get("name", cw["id"]) for cw in recipe.get("canvas_warps", [])
+    }
+
+    def is_phase_b_axis(ax: Mapping[str, Any]) -> bool:
+        if ax["parameter"]["id"] in clamped_pids:
+            return True
+        return any(
+            sh["target"].startswith("deformer:") and sh["target"].split(":", 1)[1] in canvas_warp_names
+            for sh in ax.get("shapes", [])
+        )
+
     for ax in recipe.get("author_axes", []):
-        if ax["parameter"]["id"] not in clamped_pids:
+        if not is_phase_b_axis(ax):
             apply_author_axis(ax)
 
     kf_changes = []
@@ -943,7 +1223,7 @@ def apply_post_rig(
         deformers_by_name[cwspec.get("name", cwspec["id"])] = wtarget
 
     for ax in recipe.get("author_axes", []):
-        if ax["parameter"]["id"] in clamped_pids:
+        if is_phase_b_axis(ax):
             apply_author_axis(ax)
 
     for pm in recipe.get("physics_modifiers", []):
@@ -987,7 +1267,7 @@ def run_p2l_pipeline(
     layout_path: Path | None = None,
     psd_path: Path | None = None,
     preset: str = "modern-standard",
-    port: int = 23881,
+    port: int = 0,
     face_rect: str = "",
     expressions_path: Path | None = None,
     extra_poses_path: Path | None = None,
@@ -1027,197 +1307,218 @@ def run_p2l_pipeline(
         shutil.rmtree(store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
 
+    p2l_resolved = discover_p2l_dir(p2l_dir)
+    actual_port = port if port > 0 else pick_ephemeral_port()
     token = f"p2l_{secrets.token_hex(16)}"
-    cmd = build_p2l_mcp_cmd(p2l_dir.resolve(), port, token, store_dir)
+    cmd = build_p2l_mcp_cmd(p2l_resolved, actual_port, token, store_dir)
     popen_kwargs: dict[str, Any] = {"text": True}
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if no_window:
         popen_kwargs["creationflags"] = no_window
 
+    stdout_log = out_resolved / "_mcp_stdout.log"
+    stderr_log = out_resolved / "_mcp_stderr.log"
     factory = client_factory or _default_client_factory
     t0 = time.perf_counter()
-    with (
-        open(out_resolved / "_mcp_stdout.log", "w", encoding="utf-8") as log_out,
-        open(out_resolved / "_mcp_stderr.log", "w", encoding="utf-8") as log_err,
-    ):
-        proc = popen_fn(cmd, stdout=log_out, stderr=log_err, **popen_kwargs)
-        try:
-            wait_fn(port, proc)
-            endpoint = f"http://127.0.0.1:{port}/mcp"
-            with factory(p2l_dir.resolve(), endpoint, token) as p2l:
-                if layout_path is not None:
-                    p2l.edit("project_import_layout", path=str(layout_path.resolve()), discard_unsaved=True)
-                    p2l.edit("rig_generate", preset_group=preset)
-                else:
-                    assert psd_path is not None
-                    p2l.edit(
-                        "project_import_psd",
-                        path=str(psd_path.resolve()),
-                        discard_unsaved=True,
-                        modifiers="default",
+    try:
+        with (
+            open(stdout_log, "w", encoding="utf-8") as log_out,
+            open(stderr_log, "w", encoding="utf-8") as log_err,
+        ):
+            proc = popen_fn(cmd, stdout=log_out, stderr=log_err, **popen_kwargs)
+            try:
+                wait_fn(actual_port, proc, token=token)
+                endpoint = f"http://127.0.0.1:{actual_port}/mcp"
+                with factory(p2l_resolved, endpoint, token) as p2l:
+                    if layout_path is not None:
+                        p2l.edit("project_import_layout", path=str(layout_path.resolve()), discard_unsaved=True)
+                        p2l.edit("rig_generate", preset_group=preset)
+                    else:
+                        assert psd_path is not None
+                        p2l.edit(
+                            "project_import_psd",
+                            path=str(psd_path.resolve()),
+                            discard_unsaved=True,
+                            modifiers="default",
+                        )
+
+                    exprs = (
+                        json.loads(expressions_path.read_text(encoding="utf-8"))
+                        if expressions_path is not None
+                        else None
+                    )
+                    recipe = (
+                        json.loads(post_rig_path.read_text(encoding="utf-8"))
+                        if post_rig_path is not None
+                        else None
+                    )
+                    post_summary = None
+                    if recipe is not None:
+                        post_summary = apply_post_rig(p2l, recipe, expressions=exprs)
+                    elif exprs:
+                        for ex in exprs:
+                            p2l.edit("expression_put", expression=ex)
+
+                    ov, _ = p2l.call("workspace_overview", {"limit": 500})
+                    proj, _ = p2l.call("workspace_inspect", {"scope": "project"})
+                    layers_insp, _ = p2l.call("workspace_inspect", {"scope": "layers"})
+                    (out_resolved / "overview.json").write_text(
+                        json.dumps(
+                            {
+                                "overview": ov,
+                                "project": proj,
+                                "layers": layers_insp,
+                                "post_rig_summary": post_summary,
+                                "elapsed_rig_s": round(time.perf_counter() - t0, 2),
+                            },
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
                     )
 
-                exprs = (
-                    json.loads(expressions_path.read_text(encoding="utf-8"))
-                    if expressions_path is not None
-                    else None
-                )
-                recipe = (
-                    json.loads(post_rig_path.read_text(encoding="utf-8"))
-                    if post_rig_path is not None
-                    else None
-                )
-                post_summary = None
-                if recipe is not None:
-                    post_summary = apply_post_rig(p2l, recipe, expressions=exprs)
-                elif exprs:
-                    for ex in exprs:
-                        p2l.edit("expression_put", expression=ex)
+                    canvas = ov.get("canvas", [1200, 2400])
+                    if isinstance(canvas, list) and len(canvas) >= 2:
+                        cw, ch = float(canvas[0]), float(canvas[1])
+                    elif isinstance(canvas, dict):
+                        cw, ch = float(canvas.get("width", 1200)), float(canvas.get("height", 2400))
+                    else:
+                        cw, ch = 1200.0, 2400.0
 
-                ov, _ = p2l.call("workspace_overview", {"limit": 500})
-                proj, _ = p2l.call("workspace_inspect", {"scope": "project"})
-                layers_insp, _ = p2l.call("workspace_inspect", {"scope": "layers"})
-                (out_resolved / "overview.json").write_text(
-                    json.dumps(
+                    full_poses = [
+                        {},
+                        {"ParamAngleX": -25.0},
+                        {"ParamAngleX": 25.0},
+                        {"ParamAngleY": 18.0},
+                        {"ParamBodyAngleX": 10.0, "ParamAngleZ": 12.0},
+                        {"ParamEyeLOpen": 0.0, "ParamEyeROpen": 0.0, "ParamMouthOpenY": 0.0},
+                    ]
+                    _, imgs = p2l.call(
+                        "view_render_poses",
                         {
-                            "overview": ov,
-                            "project": proj,
-                            "layers": layers_insp,
-                            "post_rig_summary": post_summary,
-                            "elapsed_rig_s": round(time.perf_counter() - t0, 2),
+                            "viewport": {"mode": "canvas_rect", "left": 0, "top": 0, "width": cw, "height": ch},
+                            "poses": full_poses,
+                            "columns": 3,
+                            "background": "checkerboard",
+                            "target_long_edge": 1600,
                         },
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
+                    )
+                    if imgs:
+                        (out_resolved / "poses_full.png").write_bytes(imgs[0])
 
-                canvas = ov.get("canvas", [1200, 2400])
-                if isinstance(canvas, list) and len(canvas) >= 2:
-                    cw, ch = float(canvas[0]), float(canvas[1])
-                elif isinstance(canvas, dict):
-                    cw, ch = float(canvas.get("width", 1200)), float(canvas.get("height", 2400))
-                else:
-                    cw, ch = 1200.0, 2400.0
+                    if parsed_face_rect is not None:
+                        fl, ft, fw, fh = parsed_face_rect
+                    else:
+                        fw, fh = cw * 0.60, ch * 0.30
+                        fl, ft = (cw - fw) * 0.5, ch * 0.02
 
-                full_poses = [
-                    {},
-                    {"ParamAngleX": -25.0},
-                    {"ParamAngleX": 25.0},
-                    {"ParamAngleY": 18.0},
-                    {"ParamBodyAngleX": 10.0, "ParamAngleZ": 12.0},
-                    {"ParamEyeLOpen": 0.0, "ParamEyeROpen": 0.0, "ParamMouthOpenY": 0.0},
-                ]
-                _, imgs = p2l.call(
-                    "view_render_poses",
-                    {
-                        "viewport": {"mode": "canvas_rect", "left": 0, "top": 0, "width": cw, "height": ch},
-                        "poses": full_poses,
-                        "columns": 3,
-                        "background": "checkerboard",
-                        "target_long_edge": 1600,
-                    },
-                )
-                if imgs:
-                    (out_resolved / "poses_full.png").write_bytes(imgs[0])
+                    face_poses: list[dict[str, float]] = [
+                        {},
+                        {"ParamEyeLOpen": 0.0, "ParamEyeROpen": 0.0},
+                        {"ParamMouthOpenY": 0.0},
+                        {"ParamMouthOpenY": 1.0},
+                        {"ParamAngleX": -25.0, "ParamAngleY": 10.0},
+                        {"ParamAngleX": 25.0, "ParamAngleY": -10.0},
+                    ]
+                    if extra_poses_path is not None:
+                        extra = json.loads(extra_poses_path.read_text(encoding="utf-8"))
+                        face_poses = face_poses + extra
 
-                if parsed_face_rect is not None:
-                    fl, ft, fw, fh = parsed_face_rect
-                else:
-                    fw, fh = cw * 0.60, ch * 0.30
-                    fl, ft = (cw - fw) * 0.5, ch * 0.02
-
-                face_poses: list[dict[str, float]] = [
-                    {},
-                    {"ParamEyeLOpen": 0.0, "ParamEyeROpen": 0.0},
-                    {"ParamMouthOpenY": 0.0},
-                    {"ParamMouthOpenY": 1.0},
-                    {"ParamAngleX": -25.0, "ParamAngleY": 10.0},
-                    {"ParamAngleX": 25.0, "ParamAngleY": -10.0},
-                ]
-                if extra_poses_path is not None:
-                    extra = json.loads(extra_poses_path.read_text(encoding="utf-8"))
-                    face_poses = (face_poses[:3] + extra)[:9]
-
-                _, fimgs = p2l.call(
-                    "view_render_poses",
-                    {
-                        "viewport": {"mode": "canvas_rect", "left": fl, "top": ft, "width": fw, "height": fh},
-                        "poses": face_poses,
-                        "columns": 3,
-                        "background": "checkerboard",
-                        "target_long_edge": 1600,
-                    },
-                )
-                if fimgs:
-                    (out_resolved / "poses_face.png").write_bytes(fimgs[0])
-
-                if sabun_poses_path is not None:
-                    sp = json.loads(sabun_poses_path.read_text(encoding="utf-8"))
-                    vp = sp["viewport"]
-                    all_p = sp["poses"]
-                    chunk_size = 8
-                    for idx in range(0, len(all_p), chunk_size):
-                        chunk = all_p[idx : idx + chunk_size]
-                        _, simgs = p2l.call(
+                    face_chunk_size = 9
+                    for idx in range(0, len(face_poses), face_chunk_size):
+                        chunk = face_poses[idx : idx + face_chunk_size]
+                        _, fimgs = p2l.call(
                             "view_render_poses",
                             {
-                                "viewport": {"mode": "canvas_rect", **vp},
+                                "viewport": {"mode": "canvas_rect", "left": fl, "top": ft, "width": fw, "height": fh},
                                 "poses": chunk,
-                                "columns": min(3, int(sp.get("columns", 3))),
+                                "columns": 3,
                                 "background": "checkerboard",
-                                "target_long_edge": 2048,
+                                "target_long_edge": 1600,
                             },
                         )
-                        if simgs:
-                            part_i = idx // chunk_size + 1
-                            fname = "poses_sabun.png" if len(all_p) <= chunk_size else f"poses_sabun_{part_i}.png"
-                            (out_resolved / fname).write_bytes(simgs[0])
+                        if fimgs:
+                            part_i = idx // face_chunk_size + 1
+                            fname = "poses_face.png" if len(face_poses) <= face_chunk_size else f"poses_face_{part_i}.png"
+                            (out_resolved / fname).write_bytes(fimgs[0])
 
-                p2l.edit("project_save_as", path=str(out_resolved / f"{name}.psd2live"))
+                    if sabun_poses_path is not None:
+                        sp = json.loads(sabun_poses_path.read_text(encoding="utf-8"))
+                        vp = sp["viewport"]
+                        all_p = sp["poses"]
+                        chunk_size = 8
+                        for idx in range(0, len(all_p), chunk_size):
+                            chunk = all_p[idx : idx + chunk_size]
+                            _, simgs = p2l.call(
+                                "view_render_poses",
+                                {
+                                    "viewport": {"mode": "canvas_rect", **vp},
+                                    "poses": chunk,
+                                    "columns": min(3, int(sp.get("columns", 3))),
+                                    "background": "checkerboard",
+                                    "target_long_edge": 2048,
+                                },
+                            )
+                            if simgs:
+                                part_i = idx // chunk_size + 1
+                                fname = "poses_sabun.png" if len(all_p) <= chunk_size else f"poses_sabun_{part_i}.png"
+                                (out_resolved / fname).write_bytes(simgs[0])
 
-                export_results: dict[str, Any] = {}
-                for target, settings in targets:
-                    tdir = out_resolved / f"export_{target}"
-                    if tdir.exists():
-                        shutil.rmtree(tdir)
-                    tdir.mkdir(parents=True, exist_ok=True)
-                    try:
-                        eres = p2l.edit(
-                            "project_export_target",
-                            target=target,
-                            output_directory=str(tdir),
-                            settings=settings,
-                        )
-                        export_results[target] = {"ok": True, "result": eres}
-                    except Exception as exc:
-                        export_results[target] = {"ok": False, "error": str(exc)}
+                    p2l.edit("project_save_as", path=str(out_resolved / f"{name}.psd2live"))
 
-                if recipe and recipe.get("web_ui"):
-                    web_index = out_resolved / "export_web" / "index.html"
-                    if web_index.exists():
-                        patch_web_viewer(web_index, recipe["web_ui"])
+                    export_results: dict[str, Any] = {}
+                    target_names = [t for t, _ in targets]
+                    for target, settings in targets:
+                        tdir = out_resolved / f"export_{target}"
+                        if tdir.exists():
+                            shutil.rmtree(tdir)
+                        tdir.mkdir(parents=True, exist_ok=True)
+                        try:
+                            eres = p2l.edit(
+                                "project_export_target",
+                                target=target,
+                                output_directory=str(tdir),
+                                settings=settings,
+                            )
+                            export_results[target] = {"ok": True, "result": eres}
+                        except Exception as exc:
+                            export_results[target] = {"ok": False, "error": str(exc)}
 
-                moc_check = validate_moc3_dir(out_resolved / "export_moc3")
-                vts_check = validate_moc3_dir(out_resolved / "export_vtube-studio")
-                report = {
-                    "name": name,
-                    "elapsed_total_s": round(time.perf_counter() - t0, 2),
-                    "post_rig_summary": post_summary,
-                    "exports": export_results,
-                    "moc3_validation": moc_check,
-                    "vts_validation": vts_check,
-                }
-                (out_resolved / "export_report.json").write_text(
-                    json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-                )
-                return report
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                    if recipe and recipe.get("web_ui"):
+                        web_index = out_resolved / "export_web" / "index.html"
+                        if web_index.exists():
+                            patch_web_viewer(web_index, recipe["web_ui"])
+
+                    moc_check = validate_moc3_dir(out_resolved / "export_moc3") if "moc3" in target_names else None
+                    vts_check = (
+                        validate_moc3_dir(out_resolved / "export_vtube-studio", require_vtube_json=True)
+                        if "vtube-studio" in target_names
+                        else None
+                    )
+                    loss_summary = summarize_export_losses(export_results)
+                    report = {
+                        "name": name,
+                        "elapsed_total_s": round(time.perf_counter() - t0, 2),
+                        "post_rig_summary": post_summary,
+                        "exports": export_results,
+                        "export_losses": loss_summary,
+                        "moc3_validation": moc_check,
+                        "vts_validation": vts_check,
+                    }
+                    (out_resolved / "export_report.json").write_text(
+                        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+                    )
+                    return report
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+    finally:
+        redact_token_in_file(stdout_log, token)
+        redact_token_in_file(stderr_log, token)
 
 
 # ---------- CLI ----------
@@ -1248,12 +1549,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--name", required=True)
     p_run.add_argument("--p2l-dir", type=Path, default=None)
     p_run.add_argument("--preset", default="modern-standard")
-    p_run.add_argument("--port", type=int, default=23881)
+    p_run.add_argument("--port", type=int, default=0, help="Local TCP port (0 = auto ephemeral port)")
     p_run.add_argument("--face-rect", default="")
     p_run.add_argument("--expressions", type=Path, default=None)
     p_run.add_argument("--extra-poses", type=Path, default=None)
     p_run.add_argument("--post-rig", type=Path, default=None)
     p_run.add_argument("--sabun-poses", type=Path, default=None)
+    p_run.add_argument(
+        "--allow-export-losses",
+        action="store_true",
+        help="Allow exit 0 even when PSD2Live reports handling=='dropped' export losses",
+    )
 
     p_web = sub.add_parser("patch-web", help="Upgrade export_web/index.html with independent toggles")
     p_web.add_argument("index_html", type=Path)
@@ -1267,59 +1573,72 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.cmd == "recover-single":
-        manifest = build_single_image_layout(
-            args.src_rgba,
-            args.seethrough_psd,
-            args.out,
+    try:
+        if args.cmd == "recover-single":
+            manifest = build_single_image_layout(
+                args.src_rgba,
+                args.seethrough_psd,
+                args.out,
+                name=args.name,
+                reproject=not args.no_reproject,
+            )
+            print(json.dumps({"name": manifest["name"], "layer_count": len(manifest["layers"])}, ensure_ascii=False))
+            return 0
+
+        if args.cmd == "split-eyes":
+            nums = [float(x) for x in args.rect.split(",")]
+            if len(nums) != 4:
+                raise ValueError("--rect must be left,top,width,height")
+            rect = {"left": nums[0], "top": nums[1], "width": nums[2], "height": nums[3]}
+            warns: list[str] = []
+            res = split_eyes_and_brows(args.src_png, args.out, args.prefix, rect, warnings=warns)
+            for msg in warns:
+                print(f"WARNING: {msg}", file=sys.stderr)
+            payload: dict[str, Any] = {
+                k: {"path": str(v[0]), "size": v[1], "rect": v[2]} for k, v in res.items()
+            }
+            payload["warnings"] = warns
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0
+
+        if args.cmd == "patch-web":
+            cfg = json.loads(args.config.read_text(encoding="utf-8"))
+            patch_web_viewer(args.index_html, cfg)
+            print(f"Patched {args.index_html}")
+            return 0
+
+        if args.cmd == "validate-moc3":
+            res = validate_moc3_dir(args.moc3_dir)
+            print(json.dumps(res, indent=2 if not args.json else None, ensure_ascii=False))
+            return 0 if res.get("ok") else 1
+
+        # run-p2l
+        p2l_dir = discover_p2l_dir(args.p2l_dir)
+        report = run_p2l_pipeline(
+            out_dir=args.out,
             name=args.name,
-            reproject=not args.no_reproject,
+            p2l_dir=p2l_dir,
+            layout_path=args.layout,
+            psd_path=args.psd,
+            preset=args.preset,
+            port=args.port,
+            face_rect=args.face_rect,
+            expressions_path=args.expressions,
+            extra_poses_path=args.extra_poses,
+            post_rig_path=args.post_rig,
+            sabun_poses_path=args.sabun_poses,
         )
-        print(json.dumps({"name": manifest["name"], "layer_count": len(manifest["layers"])}, ensure_ascii=False))
-        return 0
-
-    if args.cmd == "split-eyes":
-        nums = [float(x) for x in args.rect.split(",")]
-        if len(nums) != 4:
-            print("ERROR: --rect must be left,top,width,height", file=sys.stderr)
-            return 2
-        rect = {"left": nums[0], "top": nums[1], "width": nums[2], "height": nums[3]}
-        res = split_eyes_and_brows(args.src_png, args.out, args.prefix, rect)
-        print(json.dumps({k: {"path": str(v[0]), "size": v[1], "rect": v[2]} for k, v in res.items()}))
-        return 0
-
-    if args.cmd == "patch-web":
-        cfg = json.loads(args.config.read_text(encoding="utf-8"))
-        patch_web_viewer(args.index_html, cfg)
-        print(f"Patched {args.index_html}")
-        return 0
-
-    if args.cmd == "validate-moc3":
-        res = validate_moc3_dir(args.moc3_dir)
-        print(json.dumps(res, indent=2 if not args.json else None, ensure_ascii=False))
-        ok = bool(res.get("moc3") and res["moc3"].get("header_ok"))
-        return 0 if ok else 1
-
-    # run-p2l
-    p2l_dir = discover_p2l_dir(args.p2l_dir)
-    report = run_p2l_pipeline(
-        out_dir=args.out,
-        name=args.name,
-        p2l_dir=p2l_dir,
-        layout_path=args.layout,
-        psd_path=args.psd,
-        preset=args.preset,
-        port=args.port,
-        face_rect=args.face_rect,
-        expressions_path=args.expressions,
-        extra_poses_path=args.extra_poses,
-        post_rig_path=args.post_rig,
-        sabun_poses_path=args.sabun_poses,
-    )
-    print(json.dumps(report, indent=2, ensure_ascii=False))
-    all_exports_ok = all(item.get("ok") for item in report.get("exports", {}).values())
-    moc = report.get("moc3_validation", {}).get("moc3")
-    return 0 if (all_exports_ok and moc and moc.get("header_ok")) else 1
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        all_exports_ok = all(item.get("ok") for item in report.get("exports", {}).values())
+        moc_val = report.get("moc3_validation")
+        vts_val = report.get("vts_validation")
+        moc_ok = moc_val is None or bool(moc_val.get("ok"))
+        vts_ok = vts_val is None or bool(vts_val.get("ok"))
+        losses_ok = args.allow_export_losses or report.get("export_losses", {}).get("total_dropped", 0) == 0
+        return 0 if (all_exports_ok and moc_ok and vts_ok and losses_ok) else 1
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover
