@@ -94,8 +94,8 @@ Variant modes:
 11. `parameter_defaults` (`min` / `max` range clamps) — clamps `ParamAngleX/Y/Z` cleanly after motions and expressions are updated.
 12. `canvas_warps` — user-owned canvas warp deformers.
 13. **Phase B `author_axes`** — axes on clamped parameters **and** any axis targeting a deformer created by `canvas_warps` (so custom parameters like `ParamHdYaw` can safely deform a `canvas_warp` deformer).
-14. `physics_modifiers` — `modifier_add` (`type: "physics"`) linking head angles or eye blink to custom parameters (`ParamAngleX -> ParamHdYaw`, `ParamAngleY -> ParamHdPitch`, `ParamEyeLOpen/ROpen -> ParamEyeBounce`).
-15. `swings` — `swing_put` pendulum physics for ribbons, hair ornaments, and accessories.
+14. `physics_modifiers` — `modifier_add` (`type: "physics"`) linking head angles or eye blink to custom short-ID parameters (`ParamAngleX -> ParamHdYaw`, `ParamAngleY -> ParamHdPitch`, `ParamEyeLOpen/ROpen -> ParamEyeBounce`, paired XY hair/ribbon physics). **Requires non-empty `layer_ids`** (PSD2Live rejects empty `targets: []`; entries with no resolved `layer_ids` are warned and skipped).
+15. `swings` — `swing_put` pendulum physics (note: in PSD2Live 3.8.4, `swing_put` output IDs exceed 64 bytes and truncate in `.moc3`; prefer short-ID `author_axes` + `physics_modifiers` for `.moc3`/VTS targets).
 
 Target reference prefixes resolved automatically in `post_rig.json`:
 
@@ -106,7 +106,7 @@ Target reference prefixes resolved automatically in `post_rig.json`:
 
 ### `expressions.json` (`expression_put`)
 
-Use `"blend": "add"` for single-parameter facial FX and prop toggles so multiple expressions stack cleanly in VTube Studio:
+Use `"blend": "ADD"` for single-parameter facial FX and prop toggles so multiple expressions stack cleanly in VTube Studio (exported as `"Blend": "Add"` in `.exp3.json`):
 
 ```json
 [
@@ -114,15 +114,15 @@ Use `"blend": "add"` for single-parameter facial FX and prop toggles so multiple
     "id": "exp_smile",
     "name": "Smile",
     "entries": [
-      { "parameter": "ParamEyeExpr", "value": 1.0, "blend": "overwrite" },
-      { "parameter": "ParamMouthForm", "value": 1.0, "blend": "overwrite" },
-      { "parameter": "ParamCheek", "value": 0.4, "blend": "add" }
+      { "parameter": "ParamEyeExpr", "value": 1.0, "blend": "OVERWRITE" },
+      { "parameter": "ParamMouthForm", "value": 1.0, "blend": "OVERWRITE" },
+      { "parameter": "ParamCheek", "value": 0.4, "blend": "ADD" }
     ]
   },
   {
     "id": "exp_tears",
     "name": "Tears",
-    "entries": [{ "parameter": "ParamTears", "value": 1.0, "blend": "add" }]
+    "entries": [{ "parameter": "ParamTears", "value": 1.0, "blend": "ADD" }]
   }
 ]
 ```
@@ -138,12 +138,12 @@ Use `"blend": "add"` for single-parameter facial FX and prop toggles so multiple
       {
         "target": "deformer:両目",
         "value": -1.0,
-        "operations": [{ "kind": "scale", "x": 1.0, "y": 0.85 }]
+        "operations": [{ "type": "scale", "factors": [1.0, 0.85], "pivot": [0.5, 0.88] }]
       },
       {
         "target": "deformer:両目",
         "value": 2.0,
-        "operations": [{ "kind": "scale", "x": 1.04, "y": 1.15 }]
+        "operations": [{ "type": "scale", "factors": [1.04, 1.15], "pivot": [0.5, 0.88] }]
       }
     ]
   },
@@ -154,12 +154,12 @@ Use `"blend": "add"` for single-parameter facial FX and prop toggles so multiple
       {
         "target": "layer:headwear_inner",
         "value": -1.0,
-        "operations": [{ "kind": "translate", "x": -0.025, "y": 0.0 }]
+        "operations": [{ "type": "translate", "delta": [-0.025, 0.0] }]
       },
       {
         "target": "layer:headwear_outer",
         "value": -1.0,
-        "operations": [{ "kind": "translate", "x": -0.012, "y": 0.0 }]
+        "operations": [{ "type": "translate", "delta": [-0.012, 0.0] }]
       }
     ]
   }
@@ -248,4 +248,4 @@ Use `"blend": "add"` for single-parameter facial FX and prop toggles so multiple
 - `export_vtube-studio/` must also include `*.vtube.json`.
 - `export_losses` summarizes `handling: "dropped"` and `handling: "approximated"` entries from `exports.*.result.losses`. Any `dropped` loss fails `run-p2l` with exit code `1` unless `--allow-export-losses` is explicitly passed.
 
-> **Known PSD2Live 3.8.4 upstream issue (`IdTruncated`):** PSD2Live 3.8.4's auto-generated internal modifier IDs (hex-encoded `modifier:m1:...` and `modifier:m6:...`) exceed Cubism's 64-byte record width. PSD2Live truncates & disambiguates them in `.moc3` (logging `IdTruncated` as `handling: "dropped"`), while `layout.physics3.json` retains the untruncated IDs—disconnecting auto-generated hair chain physics in Cubism/VTS unless fixed upstream or replaced with short-ID `physics_modifiers` / `swings`. `validate_moc3_dir()` surfaces these exact unmatched IDs in `physics_unmatched_outputs`.
+> **Known PSD2Live 3.8.4 upstream issue (`IdTruncated`):** PSD2Live 3.8.4's auto-generated internal modifier IDs (hex-encoded `modifier:m1:...`, `modifier:m6:...`, `modifier:m33:...`, and `modifier:swing_...`) exceed Cubism's 64-byte record width. PSD2Live truncates & disambiguates them in `.moc3` (logging `IdTruncated` as `handling: "dropped"`), while `layout.physics3.json` retains the untruncated IDs—disconnecting auto-generated hair chain and `swing_put` physics in Cubism/VTS unless fixed upstream or replaced with short-ID `author_axes` + `physics_modifiers` (disabling `"hair"` and leaving `"swings": []`). `validate_moc3_dir()` surfaces any remaining unmatched IDs in `physics_unmatched_outputs`.

@@ -177,15 +177,15 @@ def split_eyes_and_brows(
     *,
     alpha_threshold: int = 8,
     min_px: int = 10,
-    brow_max_h_ratio: float = 0.30,
+    brow_max_h_ratio: float = 0.34,
     warnings: list[str] | None = None,
 ) -> dict[str, tuple[Path, tuple[int, int], dict[str, float]]]:
     """Split a bilateral eye PNG into character right/left eyes and right/left brows.
 
-    Uses per-side relative geometry (picking thin components strictly above each
-    side's eye anchor) so three-quarter views with slanted brow heights classify
-    accurately. Appends a warning to ``warnings`` whenever a side has an eye
-    without a detected brow.
+    Uses per-side relative geometry with dust-speck filtering and per-column
+    vertical gap checks so three-quarter views and curved anime brows whose
+    outer tips dip below the eye arch classify accurately. Appends a warning to
+    ``warnings`` whenever a side has an eye without a detected brow.
 
     Character's right = viewer's left (x < mid_x).
     Character's left  = viewer's right (x >= mid_x).
@@ -226,22 +226,58 @@ def split_eyes_and_brows(
         "brow_l": np.zeros((h, w), dtype=bool),
     }
     max_brow_h = int(h * brow_max_h_ratio)
-
     min_brow_gap = max(4, int(h * 0.04))
+
     for side, comps in by_side.items():
         if not comps:
             continue
+        main_eye = max(comps, key=lambda c: c["area"])
+        min_seed_area = max(min_px, int(main_eye["area"] * 0.015))
         comps_sorted = sorted(comps, key=lambda c: (c["y_min"], c["y_center"]))
-        top = comps_sorted[0]
-        brow_band_max = top["y_max"] + max(4, top["height"])
-        brow_group = [
-            c
-            for c in comps_sorted
-            if c["height"] <= max_brow_h and c["y_min"] <= top["y_max"] + 2 and c["y_max"] <= brow_band_max
-        ]
+        seed = next(
+            (
+                c
+                for c in comps_sorted
+                if c is not main_eye
+                and c["area"] >= min_seed_area
+                and c["height"] <= max_brow_h
+                and c["y_min"] < main_eye["y_min"]
+            ),
+            None,
+        )
+        brow_group: list[dict[str, Any]] = []
+        if seed is not None:
+            brow_band_max = seed["y_max"] + max(4, seed["height"])
+            brow_group = [
+                c
+                for c in comps_sorted
+                if c is not main_eye
+                and c["height"] <= max_brow_h
+                and c["y_max"] >= seed["y_min"] - 2
+                and c["y_min"] <= seed["y_max"] + 2
+                and c["y_max"] <= brow_band_max
+            ]
         brow_ids = {id(c) for c in brow_group}
         rest = [c for c in comps_sorted if id(c) not in brow_ids]
-        if brow_group and rest and (min(c["y_min"] for c in rest) - max(c["y_max"] for c in brow_group)) >= min_brow_gap:
+        gap_ok = False
+        if brow_group:
+            brow_mask = np.zeros((h, w), dtype=bool)
+            for comp in brow_group:
+                brow_mask |= comp["mask"]
+            eye_below = [c for c in rest if c is main_eye or c["y_min"] >= seed["y_min"]]
+            rest_mask = np.zeros((h, w), dtype=bool)
+            for comp in eye_below:
+                rest_mask |= comp["mask"]
+            shared_x = np.where(brow_mask.any(axis=0) & rest_mask.any(axis=0))[0]
+            if len(shared_x) > 0:
+                gaps = [
+                    int(np.where(rest_mask[:, x])[0].min()) - int(np.where(brow_mask[:, x])[0].max())
+                    for x in shared_x
+                ]
+                gap_ok = float(np.median(gaps)) >= min_brow_gap and min(gaps) >= 1
+            else:
+                gap_ok = (min(c["y_min"] for c in eye_below) - max(c["y_max"] for c in brow_group)) >= min_brow_gap
+        if gap_ok:
             for comp in brow_group:
                 buckets[f"brow_{side}"] |= comp["mask"]
             for comp in rest:
@@ -1236,7 +1272,11 @@ def apply_post_rig(
                 pm_targets.append({"kind": "mesh", "id": mid})
             else:
                 warnings.append(f"physics_modifier layer_id '{lid}' not found")
-        p2l.edit("modifier_add", type="physics", targets=pm_targets, config=pm_cfg)
+        if pm_targets:
+            p2l.edit("modifier_add", type="physics", targets=pm_targets, config=pm_cfg)
+        else:
+            pm_label = pm.get("id") or pm.get("name") or "?"
+            warnings.append(f"physics_modifier '{pm_label}' skipped: no valid layer_ids resolved")
 
     for sw in recipe.get("swings", []):
         lid = sw["layer_id"]

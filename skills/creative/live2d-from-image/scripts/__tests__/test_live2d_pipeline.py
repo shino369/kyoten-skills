@@ -270,6 +270,30 @@ def test_split_eyes_and_brows_front_three_quarter_and_warnings(tmp_path: Path):
     assert "brow_r" not in res_bl and res_bl["eye_r"][2]["top"] == 38.0
     assert any("side 'r'" in w for w in warns_bl)
 
+    # Real-sprite edge cases (s12):
+    # 1) Curved/slanted brow whose outer tip dips below eye.y_min (bbox Y overlaps, per-column gap >= 4)
+    # 2) Tiny 3x5 dust speck above real brow must NOT steal primary brow seed
+    # 3) Horizontally disjoint brow (no shared X columns with eye) falls back to bbox Y gap
+    curved = np.zeros((120, 220, 4), dtype=np.uint8)
+    # Side 'r': curved brow y=10..18 on x=20..52 dipping to y=17..35 on x=49..62; eye y=26..90 on x=20..48
+    curved[10:18, 20:52] = (40, 30, 30, 255)
+    curved[17:35, 49:62] = (40, 30, 30, 255)  # 4-connected slanted brow tail dipping below eye.y_min=26!
+    curved[26:90, 20:48] = (80, 90, 200, 255)  # eye_r (area=1792)
+    curved[1:5, 30:34] = (40, 30, 30, 255)  # 16px dust speck (< 1.5% of eye area) above brow
+    # Side 'l': brow horizontally offset from eye (no shared X columns)
+    curved[10:18, 120:150] = (40, 30, 30, 255)
+    curved[45:90, 160:200] = (80, 90, 200, 255)
+    curved_src = tmp_path / "curved.png"
+    Image.fromarray(curved).save(curved_src)
+    warns_cv: list[str] = []
+    res_cv = lp.split_eyes_and_brows(
+        curved_src, out_parts, "cv", {"left": 0.0, "top": 0.0, "width": 220.0, "height": 120.0}, warnings=warns_cv
+    )
+    assert set(res_cv.keys()) == {"eye_r", "eye_l", "brow_r", "brow_l"}
+    assert res_cv["brow_r"][2]["top"] == 10.0 and res_cv["brow_r"][2]["height"] == 25.0
+    assert res_cv["brow_l"][2]["top"] == 10.0
+    assert warns_cv == []
+
     # Missing brow with warnings=None works cleanly without crashing
     res_nbl_nowarn = lp.split_eyes_and_brows(
         nbl_src, out_parts, "nbl2", {"left": 0.0, "top": 0.0, "width": 200.0, "height": 100.0}
@@ -1089,6 +1113,7 @@ def test_apply_post_rig_full_order_and_warnings():
         ],
         "physics_modifiers": [
             {"id": "PhysicsHdYaw", "layer_ids": ["hat_outer", "ribbon_r", "missing_pm"], "inputs": []},
+            {"id": "PhysicsNoTargets", "layer_ids": ["missing_only"], "inputs": []},
         ],
         "swings": [
             {"id": "sw1", "layer_id": "ribbon_r", "motions": [{"kind": "lateral"}]},

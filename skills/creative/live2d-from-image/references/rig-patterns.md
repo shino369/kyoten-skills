@@ -130,7 +130,7 @@ Studying high-quality hand-rigged Live2D models reveals two physics layers that 
 2. **Paired XY (lateral + vertical) & length-graded hair pendulums:**
    - Pair every hair group with **both** a lateral pendulum (`ParamAngleX` 70% + `ParamAngleZ` 30%) **and** a vertical bounce pendulum (`ParamAngleY` 100%).
    - Grade pendulum lengths by hair mass so bangs, side locks, and long back hair oscillate out of phase: short front bangs (`length ~10`, `delay 0.9`, `accel 1.2`), medium side locks (`length 15–18`, `delay 0.8`, `accel 1.0`), and long back hair as a **3-segment chain** (`10 → 10 → 8`, `mobility 0.85 → 0.90 → 0.90`, `accel 1.0 → 1.0 → 0.8`).
-   - Note: keep custom physics output parameter IDs short (`<64` ASCII bytes) so Cubism `.moc3` never truncates them.
+   - **Avoiding PSD2Live 3.8.4 `IdTruncated` drops & `.moc3` bloat:** PSD2Live's built-in `hair` modifier and `swing_put` emit >64-byte hex-encoded output parameter IDs that Cubism `.moc3` truncates, leaving dead physics outputs in `.physics3.json`. Disabling `"hair"` in `disable_modifiers` and replacing `swings` with short-ID (`<64` ASCII bytes) `author_axes` + `physics_modifiers` (each with explicit non-empty `layer_ids`, required by PSD2Live's MCP schema) keeps all custom hair, ribbon, eyewear, and eye-bounce outputs 100% matched in `.moc3`. When authoring paired XY axes on dense ArtMeshes, prefer attaching them to lightweight `canvas_warps` deformers rather than directly on the ArtMesh to avoid 4-axis grid bloat in `.moc3`.
 
 ## 7. Orthogonal Prop / Pose Toggles, `Blend: "Add"` & Ambient Loops
 
