@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 import sys
 import urllib.error
@@ -290,7 +291,8 @@ def test_split_eyes_and_brows_front_three_quarter_and_warnings(tmp_path: Path):
         curved_src, out_parts, "cv", {"left": 0.0, "top": 0.0, "width": 220.0, "height": 120.0}, warnings=warns_cv
     )
     assert set(res_cv.keys()) == {"eye_r", "eye_l", "brow_r", "brow_l"}
-    assert res_cv["brow_r"][2]["top"] == 10.0 and res_cv["brow_r"][2]["height"] == 25.0
+    # N5: the speck is not dropped either; it joins the nearest bucket (the brow).
+    assert res_cv["brow_r"][2]["top"] == 1.0 and res_cv["brow_r"][2]["height"] == 34.0
     # r3-1: Above-brow dust speck must NOT be merged into eye_r!
     assert res_cv["eye_r"][2]["top"] == 26.0 and res_cv["eye_r"][2]["height"] == 64.0
     assert res_cv["brow_l"][2]["top"] == 10.0
@@ -337,6 +339,61 @@ def test_split_eyes_and_brows_front_three_quarter_and_warnings(tmp_path: Path):
     assert lp.split_eyes_and_brows(
         empty_src, out_parts, "empty", {"left": 0.0, "top": 0.0, "width": 60.0, "height": 60.0}
     ) == {}
+
+
+def _split_full(tmp_path: Path, arr: np.ndarray, prefix: str, warns: list[str]):
+    src = tmp_path / f"{prefix}.png"
+    Image.fromarray(arr).save(src)
+    h, w = arr.shape[:2]
+    rect = {"left": 0.0, "top": 0.0, "width": float(w), "height": float(h)}
+    return lp.split_eyes_and_brows(src, tmp_path / "parts", prefix, rect, warnings=warns)
+
+
+def _opaque_px(res) -> int:
+    return sum(int((np.array(Image.open(p))[:, :, 3] > 8).sum()) for p, _sz, _r in res.values())
+
+
+def test_split_eyes_and_brows_ignores_dust_speck_above_thick_brow(tmp_path: Path):
+    # N4: a 4x4 speck above a thick brow must not become the brow seed (which made
+    # the brow + closed lid the "eye").
+    arr = np.zeros((100, 200, 4), dtype=np.uint8)
+    arr[10:19, 20:70] = (40, 30, 30, 255)  # thick brow
+    arr[55:59, 25:70] = (20, 20, 20, 255)  # thin closed lid
+    arr[2:6, 40:44] = (40, 30, 30, 255)  # dust speck
+    warns: list[str] = []
+
+    res = _split_full(tmp_path, arr, "speck", warns)
+
+    assert res["eye_r"][2] == {"left": 25.0, "top": 55.0, "width": 45.0, "height": 4.0}
+    assert res["brow_r"][2] == {"left": 20.0, "top": 2.0, "width": 50.0, "height": 17.0}
+    assert _opaque_px(res) == int((arr[:, :, 3] > 8).sum())
+    assert warns == []
+
+
+def test_split_eyes_and_brows_reattaches_components_above_seed(tmp_path: Path):
+    # N5: a speck above the brow and a tall hair strand are neither brow nor eye;
+    # they go to the nearest bucket instead of being dropped, and a large one warns.
+    arr = np.zeros((200, 400, 4), dtype=np.uint8)
+    for off in (0, 200):
+        arr[40:52, 40 + off : 160 + off] = (50, 30, 20, 255)  # brow
+        arr[80:150, 50 + off : 150 + off] = (50, 30, 20, 255)  # eye
+    arr[20:25, 100:105] = (50, 30, 20, 255)  # speck above right brow
+    arr[10:190, 20:30] = (50, 30, 20, 255)  # tall strand left of right brow
+    arr[40:52, 300:360] = 0  # shorter left brow ...
+    arr[30:150, 360:366] = (50, 30, 20, 255)  # ... so this strand is nearest the left eye
+    warns: list[str] = []
+
+    res = _split_full(tmp_path, arr, "strand", warns)
+
+    assert _opaque_px(res) == int((arr[:, :, 3] > 8).sum())
+    assert res["brow_r"][2]["left"] == 20.0
+    assert res["brow_r"][2]["top"] == 10.0
+    assert res["brow_l"][2] == {"left": 240.0, "top": 40.0, "width": 60.0, "height": 12.0}
+    assert res["eye_l"][2] == {"left": 250.0, "top": 30.0, "width": 116.0, "height": 120.0}
+    assert warns == [
+        "Side 'r': 1800 px were neither brow nor eye; attached to brow_r",
+        "Side 'l': 720 px were neither brow nor eye; attached to eye_l",
+    ]
 
 
 # ---------- Single-image alpha-residual recovery (Case 2B) ----------
@@ -468,6 +525,62 @@ def test_build_single_image_layout_native_resolution_and_recovery(tmp_path: Path
     land_ids = [l["id"] for l in m_land["layers"]]
     assert "hat_recovered" in land_ids
     assert "shoes_recovered" in land_ids
+
+
+def _seethrough_layer_from(native: np.ndarray, res: int, erode_px: int) -> FakePSDLayer:
+    """Simulate a See-through layer: native art resized to the res grid, edge eroded."""
+    from scipy import ndimage
+
+    small = np.array(Image.fromarray(native).resize((res, res), Image.Resampling.LANCZOS))
+    alpha = ndimage.binary_erosion(small[:, :, 3] > 128, iterations=erode_px)
+    small[:, :, 3] = np.where(alpha, 255, 0)
+    ys, xs = np.where(alpha)
+    bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    crop = Image.fromarray(small[bbox[1] : bbox[3], bbox[0] : bbox[2]])
+    return FakePSDLayer("face", bbox, crop)
+
+
+@pytest.mark.parametrize("reproject", [True, False])
+def test_build_single_image_layout_scales_thresholds_to_native_resolution(tmp_path: Path, reproject: bool):
+    # N3: a 1-2 grid-px See-through edge mismatch is 4-8 native px on a source 4x the
+    # grid. Thresholds tuned on the grid must not turn that edge into fake recovered parts.
+    n, res = 800, 200
+    yy, xx = np.mgrid[0:n, 0:n]
+    body = ((xx - 400) ** 2 + (yy - 230) ** 2 < 190**2) | ((abs(xx - 400) < 160) & (yy > 380) & (yy < 780))
+    art = np.zeros((n, n, 4), dtype=np.uint8)
+    art[body] = (200, 150, 120, 255)
+    src = tmp_path / "big.png"
+    Image.fromarray(art).save(src)
+
+    for erode in (1, 2):
+        layer = _seethrough_layer_from(art, res, erode)
+        m = lp.build_single_image_layout(
+            src,
+            tmp_path / "big.psd",
+            tmp_path / f"big_e{erode}_{reproject}",
+            psd_loader=lambda _p, layer=layer: FakePSD(res, [layer]),
+            reproject=reproject,
+        )
+        assert m["canvas"] == {"width": n, "height": n}
+        assert [l["id"] for l in m["layers"]] == ["st_00_face"], f"erode={erode}"
+
+    # A hat See-through really dropped is still recovered at native resolution.
+    hat = (abs(xx - 400) < 150) & (yy > 10) & (yy < 60)
+    art_hat = art.copy()
+    art_hat[hat] = (30, 20, 60, 255)
+    src_hat = tmp_path / "big_hat.png"
+    Image.fromarray(art_hat).save(src_hat)
+    layer = _seethrough_layer_from(art, res, 1)
+    m_hat = lp.build_single_image_layout(
+        src_hat,
+        tmp_path / "big.psd",
+        tmp_path / f"big_hat_{reproject}",
+        psd_loader=lambda _p: FakePSD(res, [layer]),
+        reproject=reproject,
+    )
+    hat_layer = next(l for l in m_hat["layers"] if l["id"] == "hat_recovered")
+    assert hat_layer["rect"]["width"] >= 290
+    assert "shoes_recovered" not in [l["id"] for l in m_hat["layers"]]
 
 
 # ---------- Web viewer patching & MOC3 validation ----------
@@ -997,6 +1110,12 @@ class FakeP2LClient:
 def test_recorded_mcp_contract_fixture(tmp_path: Path):
     """F8: Replay recorded PSD2Live 3.8.4 MCP response shapes through apply_post_rig + run_p2l_pipeline."""
     fixture = json.loads((FIXTURES_DIR / "p2l_contract_fixture.json").read_text(encoding="utf-8"))
+    # N6: the recorded IdTruncated loss. PSD2Live writes the first 63 bytes of the ID
+    # into the 64-byte .moc3 record, but physics3.json keeps the full ID.
+    dropped = next(l for l in fixture["export_moc3_with_losses"]["losses"] if l["handling"] == "dropped")
+    full_id = dropped["object"]
+    written_id = re.search(r"writtenId=([^)]+)\)", dropped["note"]).group(1)
+    assert len(full_id.encode()) > 64 and full_id.startswith(written_id) and len(written_id) == 63
 
     class RecordedFixtureClient:
         def __init__(self):
@@ -1029,7 +1148,13 @@ def test_recorded_mcp_contract_fixture(tmp_path: Path):
             if tool == "project_export_target":
                 out_dir = Path(kwargs["output_directory"])
                 if kwargs["target"] in ("moc3", "vtube-studio"):
-                    _write_valid_moc3_package(out_dir, stem="layout", vtube=(kwargs["target"] == "vtube-studio"))
+                    _write_valid_moc3_package(
+                        out_dir,
+                        stem="layout",
+                        param_ids=[written_id, "ParamAngleX"],
+                        physics_outputs=[full_id, "ParamAngleX"],
+                        vtube=(kwargs["target"] == "vtube-studio"),
+                    )
                     return fixture["export_moc3_with_losses"]
             return {"ok": True}
 
@@ -1084,10 +1209,21 @@ def test_recorded_mcp_contract_fixture(tmp_path: Path):
     motion_edit = next(kw for t, kw in client_box[0].edits if t == "motion_put")
     assert motion_edit["clip"]["curves"][0]["keys"][0]["value"] == pytest.approx(14.3)
     # F2: Export losses surfaced
-    assert report["export_losses"]["total_dropped"] == 2  # moc3 + vtube-studio
-    assert report["export_losses"]["total_approximated"] == 2
-    assert report["moc3_validation"]["ok"] is True
-    assert report["vts_validation"]["ok"] is True
+    # The fixture's one dropped and one approximated loss, reported once per target.
+    by_target = report["export_losses"]["by_target"]
+    assert {t: (v["dropped"], v["approximated"]) for t, v in by_target.items()} == {
+        "moc3": (1, 1),
+        "vtube-studio": (1, 1),
+        "web": (0, 0),
+        "gif": (0, 0),
+    }
+    assert report["export_losses"]["total_dropped"] == 2
+    # The truncated ID disconnects the physics output; validation must name it.
+    for key in ("moc3_validation", "vts_validation"):
+        val = report[key]
+        assert val["ok"] is True
+        assert val["physics_unmatched_outputs"] == [full_id]
+        assert "physics3.json has 1 output parameter ID(s) not present in .moc3" in val["warnings"]
 
 
 def test_apply_post_rig_full_order_and_warnings():
@@ -1264,6 +1400,9 @@ def test_run_p2l_pipeline_ephemeral_port_redaction_extra_poses_and_modes(tmp_pat
 
     out_dir = tmp_path / "out_layout"
     (out_dir / "_mcp_store").mkdir(parents=True)
+    # N8: sheets from an earlier run with fewer/more poses must not survive
+    for stale in ("poses_face.png", "poses_face_3.png", "poses_sabun.png"):
+        (out_dir / stale).write_bytes(b"old")
 
     # F10: Simulate PSD2Live printing bearer token into stdout & stderr logs; must be redacted!
     seen_tokens: list[str] = []
@@ -1319,6 +1458,13 @@ def test_run_p2l_pipeline_ephemeral_port_redaction_extra_poses_and_modes(tmp_pat
     assert {"ParamAngleX": -25.0, "ParamAngleY": 10.0} in face_poses_all
     assert (out_dir / "poses_face_1.png").exists()
     assert (out_dir / "poses_face_2.png").exists()
+    assert sorted(p.name for p in out_dir.glob("poses_*.png")) == [
+        "poses_face_1.png",
+        "poses_face_2.png",
+        "poses_full.png",
+        "poses_sabun_1.png",
+        "poses_sabun_2.png",
+    ]
 
     assert report["exports"]["moc3"]["ok"] is True
     assert report["exports"]["gif"]["ok"] is False
@@ -1443,6 +1589,167 @@ def test_run_p2l_pipeline_ephemeral_port_redaction_extra_poses_and_modes(tmp_pat
 
     # Redact helper no-op on missing file
     lp.redact_token_in_file(tmp_path / "missing_log.txt", "tok")
+
+
+class _StopTrackingProc:
+    def __init__(self):
+        self.terminated = False
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=5):
+        pass
+
+
+def _minimal_p2l_inputs(tmp_path: Path) -> dict[str, Path]:
+    p2l_dir = tmp_path / "p2l"
+    (p2l_dir / "app").mkdir(parents=True, exist_ok=True)
+    layout_path = tmp_path / "layout.json"
+    layout_path.write_text("{}", encoding="utf-8")
+    return {"p2l_dir": p2l_dir, "layout_path": layout_path}
+
+
+def test_run_p2l_pipeline_retries_auto_port_when_mcp_exits_early(tmp_path: Path, monkeypatch):
+    # N8: the auto-picked port can be taken before Java binds it; retry on a new port.
+    ports = iter([5001, 5002, 5003, 5004])
+    monkeypatch.setattr(lp, "pick_ephemeral_port", lambda: next(ports))
+    procs: list[_StopTrackingProc] = []
+    seen_ports: list[int] = []
+
+    def popen(cmd, **_kw):
+        seen_ports.append(int(cmd[cmd.index("--port") + 1]))
+        procs.append(_StopTrackingProc())
+        return procs[-1]
+
+    def wait_once_early(port, proc, **_kw):
+        if port == 5001:
+            raise lp.MCPExitedEarly("PSD2Live MCP exited early with code 1")
+
+    report = lp.run_p2l_pipeline(
+        out_dir=tmp_path / "out",
+        name="hero",
+        **_minimal_p2l_inputs(tmp_path),
+        popen_fn=popen,
+        wait_fn=wait_once_early,
+        client_factory=lambda *_a: FakeP2LClient(),
+    )
+
+    assert report["name"] == "hero"
+    assert seen_ports == [5001, 5002]
+    assert all(p.terminated for p in procs)
+
+
+def test_run_p2l_pipeline_gives_up_after_three_early_exits(tmp_path: Path, monkeypatch):
+    ports = iter([6001, 6002, 6003, 6004])
+    monkeypatch.setattr(lp, "pick_ephemeral_port", lambda: next(ports))
+    seen_ports: list[int] = []
+
+    def popen(cmd, **_kw):
+        seen_ports.append(int(cmd[cmd.index("--port") + 1]))
+        return _StopTrackingProc()
+
+    def always_early(*_a, **_kw):
+        raise lp.MCPExitedEarly("PSD2Live MCP exited early with code 1")
+
+    with pytest.raises(lp.MCPExitedEarly):
+        lp.run_p2l_pipeline(
+            out_dir=tmp_path / "out",
+            name="hero",
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=always_early,
+            client_factory=lambda *_a: FakeP2LClient(),
+        )
+    assert seen_ports == [6001, 6002, 6003]
+
+    # An explicit --port is the user's choice: no retry on another port.
+    seen_ports.clear()
+    with pytest.raises(lp.MCPExitedEarly):
+        lp.run_p2l_pipeline(
+            out_dir=tmp_path / "out_fixed",
+            name="hero",
+            port=7123,
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=always_early,
+            client_factory=lambda *_a: FakeP2LClient(),
+        )
+    assert seen_ports == [7123]
+
+
+def test_run_p2l_pipeline_sigterm_stops_mcp_and_redacts_logs(tmp_path: Path):
+    # N8: SIGTERM must run the cleanup (stop Java, redact the token) and restore handlers.
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    proc = _StopTrackingProc()
+    tokens: list[str] = []
+
+    def popen(cmd, stdout=None, **_kw):
+        tokens.append(cmd[cmd.index("--token") + 1])
+        stdout.write(f"token={tokens[0]}\n")
+        return proc
+
+    class SignalledClient(FakeP2LClient):
+        def edit(self, tool: str, **kwargs):
+            signal.raise_signal(signal.SIGTERM)
+            return super().edit(tool, **kwargs)
+
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit) as exc:
+        lp.run_p2l_pipeline(
+            out_dir=out,
+            name="hero",
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=lambda *a, **kw: None,
+            client_factory=lambda *_a: SignalledClient(),
+        )
+
+    assert exc.value.code == 128 + signal.SIGTERM
+    assert proc.terminated
+    log = (out / "_mcp_stdout.log").read_text(encoding="utf-8")
+    assert tokens[0] not in log and "<REDACTED>" in log
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_exit_on_signals_skips_off_main_thread_and_missing_signals(monkeypatch):
+    import signal
+    import threading
+
+    box: list[dict] = []
+    t = threading.Thread(target=lambda: box.append(lp._install_exit_on_signals()))
+    t.start()
+    t.join()
+    assert box == [{}]
+
+    monkeypatch.delattr(lp.signal, "SIGHUP", raising=False)  # e.g. Windows
+    before = signal.getsignal(signal.SIGTERM)
+    previous = lp._install_exit_on_signals()
+    try:
+        assert list(previous) == [signal.SIGTERM]
+    finally:
+        lp._restore_signals(previous)
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_run_p2l_pipeline_propagates_popen_failure(tmp_path: Path):
+    def popen(*_a, **_kw):
+        raise OSError("java not found")
+
+    with pytest.raises(OSError, match="java not found"):
+        lp.run_p2l_pipeline(
+            out_dir=tmp_path / "out",
+            name="hero",
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=lambda *a, **kw: None,
+            client_factory=lambda *_a: FakeP2LClient(),
+        )
 
 
 def test_default_loaders(tmp_path: Path, monkeypatch):

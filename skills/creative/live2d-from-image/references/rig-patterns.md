@@ -12,7 +12,7 @@ See-through outputs a 1280×1280 square padded PSD whose diffusion-reconstructed
 - **Native-pixel re-projection (`reproject_visible_pixels`):**
   - Always map layers back into the source artwork's full native canvas resolution via `unpad_params` + `map_bbox` + `paste_onto_canvas` (done automatically by `recover-single`).
   - Process layers front-to-back, accumulating an `occluder_mask` of opaque pixels from layers in front.
-  - Wherever a layer is visible in the original artwork and not covered by `binary_dilation(occluder_mask, 3)`, blend crisp original artist RGB back in with a Gaussian feather (`sigma=1.5`).
+  - Wherever a layer is visible in the original artwork and not covered by `binary_dilation(occluder_mask, 3)`, blend crisp original artist RGB back in with a Gaussian feather (`sigma=1.5`). These tolerances (and `recover-single`'s coverage dilation and minimum part sizes) are in See-through grid pixels; on a source larger than the grid, scale lengths by `1/scale` and areas by `1/scale²` (`recover-single` does this), or a 1–2 px segmentation edge becomes fake recovered outline parts.
   - Behind occluders, keep See-through's built-in hidden-area completion pixels so head turns and hair sway never expose blank seams.
 - **General cleanup rules:**
   - **Prevent double-nose shadow drift:** Exclude a dilated nose mask (`iterations=12`) from `head_face` re-projection so See-through's clean skin stays behind `head_nose`, while re-projecting crisp native pixels onto `head_nose`.
@@ -25,7 +25,8 @@ Game sprite rips (Unity/KiriKiri/Naninovel) often lack pivot metadata and mix di
 
 1. **Calibrating placement & scale when pivots/offsets are missing:**
    - Measure the neutral composite (or inspect the face region on the base head sprite) to compute the exact `(left, top, width, height)` bounding boxes of the eye sockets, mouth anchor, and arm attachment points.
-   - Check pixel scale explicitly: extracted facial-feature sheets (`Eyes_*.png`, `Mouth_*.png`) are often authored at a different DPI/scale than the full-body sprite (e.g., ~0.72× relative to the head canvas). Scale by the measured socket-width ratio (`target_eye_span / sprite_eye_span`) rather than pasting 1:1.
+   - If any rendered reference of the assembled character exists (character sheet, game screenshot, atlas preview), register each part against it with masked multi-scale template matching (for example OpenCV `matchTemplate` with `TM_SQDIFF` and the part's alpha as the mask, over a range of scales). The best match gives each part's position and scale in the reference; divide by the common scale to get native canvas coordinates.
+   - Expect every part of one rig to register at the **same** scale, so parts compose 1:1 at native size. Do not rescale a part (for example eyes or mouth) by eye-balled socket width; rescale only when its registered scale clearly differs from the rest. Tiny parts (mouths of a few dozen pixels) can be too small to register on a full-body reference: register them on a close-up (bust/face) image instead and express their offset relative to the head.
 2. **Aligning variant sprites of different sizes:**
    - Expression variants (`Eyes_Cry.png`, `Eyes_Angry.png`, raised arms) frequently have tighter or wider tight-cropped bounding boxes than the neutral sprite (for example, teardrops extending downward or raised brows extending upward).
    - Never align variants blindly by top-left `(x, y)` or image center. Instead, anchor them by a shared feature (e.g., upper-lash/brow landmark or normalized cross-correlation against the neutral eye/shoulder mask) and compute each variant's canvas `rect` relative to that anchor.
@@ -33,7 +34,7 @@ Game sprite rips (Unity/KiriKiri/Naninovel) often lack pivot metadata and mix di
    - Do **not** tag a fused single-layer eye sprite (containing sclera + iris + lash in one PNG) as `["eye", "iris"]` or `["eye", "white"]`: PSD2Live's blink deformer squashes eyelids while leaving a single `iris` mesh visible behind the closed lid.
    - For **live open eyes**, use the 1280px head-pass See-through layers (`eyewhite`, `irides`, `eyelash`) with native-pixel re-projection so gaze tracking, clipping, and blinking work independently.
    - For **static closed-eye expression sprites** (Smile, Gloom), tag them as `["object"]`, bind them to the face contour deformer (`顔デフォーマ`), and add a 2D opacity gate (Pattern 3 below).
-   - When splitting bilateral eye/brow sprites with `split-eyes`, verify stderr `warnings`: on three-quarter faces, `split_eyes_and_brows` uses per-side relative geometry above each eye anchor and warns whenever a side has no separate brow component.
+   - When splitting bilateral eye/brow sprites with `split-eyes`, verify stderr `warnings`: on three-quarter faces, `split_eyes_and_brows` uses per-side relative geometry above each eye anchor and warns whenever a side has no separate brow component. Components that are neither brow nor eye (hair strands, a brow too slanted to fit the brow height limit) are attached to the nearest of the two, with a warning when they are not dust; check those parts by eye.
 
 ## 3. Live Open-Eye Expressions + Blink-Immune Closed-Eye Expressions
 

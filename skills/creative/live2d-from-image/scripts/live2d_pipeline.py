@@ -21,14 +21,17 @@ import argparse
 import html
 import importlib
 import json
+import math
 import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -178,14 +181,19 @@ def split_eyes_and_brows(
     alpha_threshold: int = 8,
     min_px: int = 10,
     brow_max_h_ratio: float = 0.34,
+    dust_ratio: float = 0.1,
     warnings: list[str] | None = None,
 ) -> dict[str, tuple[Path, tuple[int, int], dict[str, float]]]:
     """Split a bilateral eye PNG into character right/left eyes and right/left brows.
 
     Uses per-side relative geometry with dust-speck filtering and per-column
     vertical gap checks so three-quarter views and curved anime brows whose
-    outer tips dip below the eye arch classify accurately. Appends a warning to
-    ``warnings`` whenever a side has an eye without a detected brow.
+    outer tips dip below the eye arch classify accurately. A component smaller than
+    ``dust_ratio`` of the feature it is compared with does not decide which part is
+    the brow. Components that end up in neither the brow nor the eye are attached to
+    the nearest of the two. Appends a warning to ``warnings`` whenever a side has an
+    eye without a detected brow, or a component of at least ``dust_ratio`` of the brow
+    seed had to be attached that way.
 
     Character's right = viewer's left (x < mid_x).
     Character's left  = viewer's right (x >= mid_x).
@@ -243,22 +251,32 @@ def split_eyes_and_brows(
         comps_sorted = sorted(comps, key=lambda c: (c["y_min"], c["y_center"]))
         largest = max(comps_sorted, key=lambda c: c["area"])
         below_largest = [c for c in comps_sorted if c["y_min"] - largest["y_max"] >= min_brow_gap]
-        if largest is comps_sorted[0] and largest["height"] <= max_brow_h and below_largest:
-            main_eye = max(below_largest, key=lambda c: c["area"])
+        above_largest = comps_sorted[: next(i for i, c in enumerate(comps_sorted) if c is largest)]
+        # Thick brow over a thin closed lid: the largest component is the brow when
+        # nothing but dust lies above it and something sits below it.
+        lid = max(below_largest, key=lambda c: c["area"]) if below_largest else None
+        if (
+            lid is not None
+            and largest["height"] <= max_brow_h
+            and all(c["area"] < dust_ratio * lid["area"] for c in above_largest)
+        ):
+            main_eye = lid
         else:
             main_eye = largest
         min_seed_area = max(min_px, int(main_eye["area"] * 0.015))
-        seed = next(
-            (
-                c
-                for c in comps_sorted
-                if c is not main_eye
-                and c["area"] >= min_seed_area
-                and c["height"] <= max_brow_h
-                and c["y_min"] < main_eye["y_min"]
-            ),
-            None,
-        )
+        seed_cands = [
+            c
+            for c in comps_sorted
+            if c is not main_eye
+            and c["area"] >= min_seed_area
+            and c["height"] <= max_brow_h
+            and c["y_min"] < main_eye["y_min"]
+        ]
+        seed: dict[str, Any] | None = None
+        if seed_cands:
+            # Topmost brow-like component, skipping dust relative to the biggest one.
+            biggest_area = max(c["area"] for c in seed_cands)
+            seed = next(c for c in seed_cands if c["area"] >= dust_ratio * biggest_area)
         brow_group: list[dict[str, Any]] = []
         if seed is not None:
             brow_band_max = seed["y_max"] + max(4, seed["height"])
@@ -298,6 +316,19 @@ def split_eyes_and_brows(
                 buckets[f"brow_{side}"] |= comp["mask"]
             for comp in eye_below:
                 buckets[f"eye_{side}"] |= comp["mask"]
+            placed = brow_ids | {id(c) for c in eye_below}
+            leftovers = [c for c in comps_sorted if id(c) not in placed]
+            if leftovers:
+                dist = {
+                    key: ndimage.distance_transform_edt(~buckets[key]) for key in (f"brow_{side}", f"eye_{side}")
+                }
+                for comp in leftovers:
+                    key = min(dist, key=lambda k: float(dist[k][comp["mask"]].min()))
+                    buckets[key] |= comp["mask"]
+                    if warnings is not None and comp["area"] >= dust_ratio * seed["area"]:
+                        warnings.append(
+                            f"Side '{side}': {comp['area']} px were neither brow nor eye; attached to {key}"
+                        )
         else:
             for comp in comps_sorted:
                 buckets[f"eye_{side}"] |= comp["mask"]
@@ -355,7 +386,13 @@ def build_single_image_layout(
     tag_map: Mapping[str, list[str]] = DEFAULT_SEETHROUGH_TAG_MAP,
     psd_loader: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a native-resolution psd2live-layout manifest from PNG + See-through PSD."""
+    """Build a native-resolution psd2live-layout manifest from PNG + See-through PSD.
+
+    ``min_top_px`` / ``min_bottom_px`` and the internal edge tolerances are in
+    See-through grid pixels (``psd.width``); they are converted to native pixels so a
+    1-2 grid-px segmentation edge mismatch on a larger source is not mistaken for a
+    dropped part.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     out_parts = out_dir / "parts"
     out_parts.mkdir(parents=True, exist_ok=True)
@@ -368,6 +405,13 @@ def build_single_image_layout(
     ow, oh = orig.size
     orig_arr = np.array(orig)
     scale, pad_x, pad_y = unpad_params(ow, oh, res)
+    native_per_grid = 1.0 / scale
+
+    def to_native_len(grid_px: int) -> int:
+        return max(grid_px, math.ceil(grid_px * native_per_grid))
+
+    def to_native_area(grid_px: int) -> int:
+        return max(1, math.ceil(grid_px * native_per_grid * native_per_grid))
 
     raw_layers: list[tuple[int, str, tuple[int, int, int, int], np.ndarray]] = []
     cov = np.zeros((oh, ow), dtype=np.uint8)
@@ -388,7 +432,14 @@ def build_single_image_layout(
         occ = np.zeros((oh, ow), dtype=bool)
         reprojected: list[tuple[int, str, tuple[int, int, int, int], np.ndarray]] = []
         for idx, lname, box, arr in reversed(raw_layers):
-            out_arr = reproject_visible_pixels(arr, box, orig_arr, occ)
+            out_arr = reproject_visible_pixels(
+                arr,
+                box,
+                orig_arr,
+                occ,
+                dilate_iters=to_native_len(3),
+                feather_sigma=1.5 * max(1.0, native_per_grid),
+            )
             x0, y0, x1, y1 = box
             occ[y0:y1, x0:x1] |= out_arr[:, :, 3] > 120
             reprojected.append((idx, lname, box, out_arr))
@@ -412,7 +463,7 @@ def build_single_image_layout(
             item["tags"] = list(tag_map[lname])
         layers.append(item)
 
-    cov_bool = ndimage.binary_dilation(cov > 80, iterations=2)
+    cov_bool = ndimage.binary_dilation(cov > 80, iterations=to_native_len(2))
     orig_bool = orig_arr[:, :, 3] > 20
     missing = orig_bool & (~cov_bool)
 
@@ -428,7 +479,7 @@ def build_single_image_layout(
                 keep |= c
         if not keep.any():
             return None
-        keep = ndimage.binary_dilation(keep, iterations=3) & orig_bool
+        keep = ndimage.binary_dilation(keep, iterations=to_native_len(3)) & orig_bool
         ys, xs = np.where(keep)
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
@@ -444,8 +495,8 @@ def build_single_image_layout(
     bot_zone = np.zeros((oh, ow), dtype=bool)
     bot_zone[int(oh * (1.0 - bottom_zone_ratio)) :, :] = True
 
-    shoes_rec = extract_zone(bot_zone, "shoes_recovered.png", min_px=min_bottom_px)
-    hat_rec = extract_zone(top_zone, "hat_recovered.png", min_px=min_top_px)
+    shoes_rec = extract_zone(bot_zone, "shoes_recovered.png", min_px=to_native_area(min_bottom_px))
+    hat_rec = extract_zone(top_zone, "hat_recovered.png", min_px=to_native_area(min_top_px))
 
     if shoes_rec is not None:
         sp, ssz, srect = shoes_rec
@@ -943,6 +994,47 @@ def build_p2l_mcp_cmd(
     ]
 
 
+class MCPExitedEarly(RuntimeError):
+    """PSD2Live's MCP process exited before it answered the readiness probe."""
+
+
+_STARTUP_ATTEMPTS_AUTO_PORT = 3
+
+
+def _stop_process(proc: Any) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _install_exit_on_signals() -> dict[int, Any]:
+    """Turn SIGTERM/SIGHUP into SystemExit so cleanup in ``finally`` blocks runs.
+
+    Returns the previous handlers; empty when not on the main thread (Python only
+    allows signal handlers there). SIGKILL cannot be caught.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def _exit(signum: int, _frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    previous: dict[int, Any] = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            previous[signum] = signal.signal(signum, _exit)
+    return previous
+
+
+def _restore_signals(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
 def pick_ephemeral_port() -> int:
     """Return an unused localhost TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -994,7 +1086,7 @@ def wait_for_mcp(
     }
     while time_fn() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"PSD2Live MCP exited early with code {proc.returncode}")
+            raise MCPExitedEarly(f"PSD2Live MCP exited early with code {proc.returncode}")
         req = urllib.request.Request(url, data=probe_body, headers=headers, method="POST")
         try:
             with opener(req, timeout=1.0) as resp:
@@ -1363,10 +1455,12 @@ def run_p2l_pipeline(
         shutil.rmtree(store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
 
+    for stale in [*out_resolved.glob("poses_face*.png"), *out_resolved.glob("poses_sabun*.png")]:
+        stale.unlink()
+
     p2l_resolved = discover_p2l_dir(p2l_dir)
-    actual_port = port if port > 0 else pick_ephemeral_port()
     token = f"p2l_{secrets.token_hex(16)}"
-    cmd = build_p2l_mcp_cmd(p2l_resolved, actual_port, token, store_dir)
+    attempts = 1 if port > 0 else _STARTUP_ATTEMPTS_AUTO_PORT
     popen_kwargs: dict[str, Any] = {"text": True}
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if no_window:
@@ -1376,14 +1470,28 @@ def run_p2l_pipeline(
     stderr_log = out_resolved / "_mcp_stderr.log"
     factory = client_factory or _default_client_factory
     t0 = time.perf_counter()
+    previous_handlers = _install_exit_on_signals()
     try:
         with (
             open(stdout_log, "w", encoding="utf-8") as log_out,
             open(stderr_log, "w", encoding="utf-8") as log_err,
         ):
-            proc = popen_fn(cmd, stdout=log_out, stderr=log_err, **popen_kwargs)
+            proc = None
             try:
-                wait_fn(actual_port, proc, token=token)
+                attempt = 1
+                while True:
+                    # An auto-picked port can be taken before Java binds it: retry on a new one.
+                    actual_port = port if port > 0 else pick_ephemeral_port()
+                    cmd = build_p2l_mcp_cmd(p2l_resolved, actual_port, token, store_dir)
+                    proc = popen_fn(cmd, stdout=log_out, stderr=log_err, **popen_kwargs)
+                    try:
+                        wait_fn(actual_port, proc, token=token)
+                        break
+                    except MCPExitedEarly:
+                        if attempt >= attempts:
+                            raise
+                        _stop_process(proc)
+                        attempt += 1
                 endpoint = f"http://127.0.0.1:{actual_port}/mcp"
                 with factory(p2l_resolved, endpoint, token) as p2l:
                     if layout_path is not None:
@@ -1566,15 +1674,12 @@ def run_p2l_pipeline(
                     )
                     return report
             finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
+                if proc is not None:
+                    _stop_process(proc)
     finally:
         redact_token_in_file(stdout_log, token)
         redact_token_in_file(stderr_log, token)
+        _restore_signals(previous_handlers)
 
 
 # ---------- CLI ----------
