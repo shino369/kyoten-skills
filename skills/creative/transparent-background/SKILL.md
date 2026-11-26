@@ -6,24 +6,38 @@ description: Turn an image with a flat or near-flat background (illustration, st
 # Transparent Background
 
 One script, `scripts/imgalpha.py`, does the work. Run it through uv (no global installs) on
-macOS, Linux, or Windows. Define the `ia` helper once per shell command, from inside the repo. It
-resolves an absolute path, so a later `cd` is fine. The examples below use it.
+macOS, Linux, or Windows, with the pinned versions below. Define the `ia` helper in each shell
+command that uses it; the examples below use it. Set `IA_PY` to the absolute path of
+`scripts/imgalpha.py` inside the folder that holds this SKILL.md (Claude Code shows it as the
+skill's base directory; a project install is `<workspace>/.agents/skills/transparent-background/`).
+Never derive it from the current directory: a repository you are inside could hold its own copy.
+
+**Run `ia` from the workspace root or another folder you trust, never from inside a folder of
+received images.** uv reads `pyproject.toml`, `uv.toml`, and `.venv` from the current folder and its
+parents, so a folder that came with the images could change what gets installed and run.
+`--no-project --no-config` keeps the first two out; the folder rule covers the rest. Pass images as
+absolute paths or paths relative to that folder.
 
 bash / zsh / Git Bash:
 
 ```bash
-IA_PY="$(git rev-parse --show-toplevel)/.agents/skills/transparent-background/scripts/imgalpha.py"
-ia() { uv run --quiet --python 3.12 --with pillow --with numpy --with scipy python -I "$IA_PY" "$@"; }
+IA_PY="/absolute/path/to/transparent-background/scripts/imgalpha.py"
+ia() { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 python -I "$IA_PY" "$@"; }
 ia remove in.jpg -o out.png
 ```
 
 PowerShell (`cmd.exe` has no functions, so use PowerShell or Git Bash):
 
 ```powershell
-$IA_PY = Join-Path (git rev-parse --show-toplevel) '.agents/skills/transparent-background/scripts/imgalpha.py'
-function ia { uv run --quiet --python 3.12 --with pillow --with numpy --with scipy python -I $IA_PY @args }
+$IA_PY = 'C:\absolute\path\to\transparent-background\scripts\imgalpha.py'
+function ia { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 python -I $IA_PY @args }
 ia remove in.jpg -o out.png
 ```
+
+`--no-build` installs wheels only (all three packages have them for Python 3.12 on macOS, Linux, and
+Windows). `--exclude-newer P7D` makes uv ignore files uploaded in the last 7 days, so a file added
+later to a pinned release is not picked up; it needs uv 0.9.17 or later (`uv --version`).
+`--no-config` also skips your own uv settings, such as a private index.
 
 Write colours as `r,g,b` (`--bg 40,96,200`). It needs no quoting in any shell. `#rrggbb` also
 works, but quote it: PowerShell treats a bare `#` as a comment, and `cmd` keeps single quotes.
@@ -92,5 +106,5 @@ pixel keeps its light/dark deviation, so brush or crayon texture survives. Pick 
 When developing inside the skill repository, run the Python test suite with 100% branch coverage:
 
 ```bash
-uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow --with numpy --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/creative/transparent-background/scripts --cov=imgalpha --cov-branch --cov-fail-under=100
+pnpm test:python:imgalpha
 ```
