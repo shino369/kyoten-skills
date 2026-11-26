@@ -429,7 +429,11 @@ describe('verify_web', () => {
   });
 
   test('patched viewer HTML drives stub P2LPlayer toggles, exclusive_group, and transitive requires (F8)', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-viewer-int-'));
+    // realpath: on macOS os.tmpdir() is under the /var -> /private/var symlink, and the viewer's
+    // relative ./p2l.js import would otherwise load as a second module instance.
+    const dir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-viewer-int-'))
+    );
     tempDirs.push(dir);
     const scriptsDir = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
