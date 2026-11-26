@@ -1,0 +1,165 @@
+{
+  "modifier_stack": {
+    "entries": [
+      {
+        "id": "m1",
+        "type": "face/fitted",
+        "enabled": true,
+        "config": {
+          "strength": 1.0,
+          "headShellTurn": 0.5,
+          "tuning": { "turn": 30, "look": 60, "depth": 50 }
+        }
+      },
+      {
+        "id": "m18",
+        "type": "mouth.outline",
+        "enabled": true,
+        "config": {}
+      }
+    ]
+  },
+  "workspace_overview": {
+    "project_id": "proj-fixture-01",
+    "state": "8eaf0396-8e0c-44cd-8515-6e9defa0b490:1:10",
+    "loaded": true,
+    "canvas": [2576, 3667],
+    "parameters": {
+      "items": [
+        {
+          "id": "ParamAngleX",
+          "name": "角度 X",
+          "min": -30.0,
+          "max": 30.0,
+          "default": 0.0,
+          "kind": "normal",
+          "repeat": false
+        },
+        {
+          "id": "ParamEyeLOpen",
+          "name": "左目 開閉",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 1.0,
+          "kind": "normal",
+          "repeat": false
+        },
+        {
+          "id": "ParamHeaddress",
+          "name": "Headdress",
+          "min": 0.0,
+          "max": 1.0,
+          "default": 1.0,
+          "kind": "normal",
+          "repeat": false
+        }
+      ]
+    },
+    "deformers": {
+      "items": [
+        {
+          "target": "warp:modifier:m1:7368617265642f6465666f726d65723a4465666f726d48656164436f6e7461696e6572",
+          "name": "頭部コンテナ",
+          "parent": "rotation:modifier:m1:head_rot",
+          "children": 3
+        },
+        {
+          "target": "warp:modifier:m1:7368617265642f6465666f726d65723a4465666f726d46616365436f6e746f7572",
+          "name": "顔デフォーマ",
+          "parent": "warp:modifier:m1:7368617265642f6465666f726d65723a4465666f726d48656164436f6e7461696e6572",
+          "children": 5
+        }
+      ]
+    }
+  },
+  "workspace_inspect_objects": {
+    "scope": "objects",
+    "items": [
+      {
+        "layerId": "headdress_outer",
+        "target": "mesh:ArtMeshObjects15"
+      },
+      {
+        "layerId": "eye_close_l",
+        "target": "mesh:ArtMeshEyeCloseL"
+      }
+    ],
+    "total": 2
+  },
+  "workspace_inspect_project": {
+    "scope": "project",
+    "state": "8eaf0396-8e0c-44cd-8515-6e9defa0b490:1:10",
+    "project_id": "proj-fixture-01",
+    "loaded": true,
+    "busy": false,
+    "canvas": [2576, 3667]
+  },
+  "workspace_inspect_layers": {
+    "scope": "layers",
+    "items": [
+      {
+        "id": "headdress_outer",
+        "name": "headdress_outer",
+        "visible": true,
+        "tags": ["headwear"]
+      },
+      {
+        "id": "eye_close_l",
+        "name": "eye_close_l",
+        "visible": true,
+        "tags": ["eye", "closed", "left"]
+      }
+    ],
+    "total": 2
+  },
+  "motion_list": {
+    "clips": [
+      { "id": "modifier_6d3238", "name": "Idle" },
+      { "id": "modifier_6d3239", "name": "Blink" }
+    ]
+  },
+  "motion_get_idle": {
+    "clip": {
+      "id": "modifier_6d3238",
+      "name": "Idle",
+      "builtin": true,
+      "loop": true,
+      "duration": 4.0,
+      "fps": 30,
+      "curves": [
+        {
+          "parameter": "ParamAngleX",
+          "keys": [
+            { "t": 0.0, "value": 22.0, "in": [0.0, 22.0], "out": [0.5, 22.0] },
+            { "t": 2.0, "value": -22.0 }
+          ]
+        }
+      ]
+    }
+  },
+  "export_moc3_with_losses": {
+    "state": "8eaf0396-8e0c-44cd-8515-6e9defa0b490:1:44",
+    "target": "moc3",
+    "compiler": "3.8.4",
+    "files": [
+      "layout.moc3",
+      "layout.model3.json",
+      "layout.physics3.json",
+      "layout.4096/texture_00.png"
+    ],
+    "losses": [
+      {
+        "object": "modifier:m1:7368617265642f6465666f726d65723a4465666f726d4861697246726f6e74466f6c6c6f77",
+        "feature": "parameter_grid",
+        "handling": "approximated",
+        "note": "4-axis keyform grid exceeds the target's 3 axes"
+      },
+      {
+        "object": "modifier:m1:7368617265642f6465666f726d65723a4465666f726d48656164526f746174696f6e",
+        "feature": "structure",
+        "handling": "dropped",
+        "note": "Deformer change not representable: IdTruncated(recordByteWidth=64, writtenId=modifier:m1:7368617265642f6465666f726d65723a4465666f726d4865616)"
+      }
+    ]
+  }
+}

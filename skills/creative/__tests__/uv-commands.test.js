@@ -395,6 +395,9 @@ describe('creative skill docs', () => {
       counted[join('psd-flats-cleanup', 'SKILL.md')]
     ).toBeGreaterThanOrEqual(2);
     expect(
+      counted[join('live2d-from-image', 'SKILL.md')]
+    ).toBeGreaterThanOrEqual(2);
+    expect(
       counted[join('transparent-background', 'scripts', 'imgalpha.py')]
     ).toBe(1);
     expect(
@@ -402,6 +405,9 @@ describe('creative skill docs', () => {
     ).toBe(1);
     expect(
       counted[join('psd-flats-cleanup', 'scripts', 'color_cleanup.py')]
+    ).toBe(1);
+    expect(
+      counted[join('live2d-from-image', 'scripts', 'live2d_pipeline.py')]
     ).toBe(1);
   });
 
