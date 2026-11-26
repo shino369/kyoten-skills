@@ -8,7 +8,7 @@ Subcommands (run with uv, nothing installed globally):
   recolor     recolour shapes, keeping their texture
   preview     composite on a colour, with zoomed crops / circles, to inspect results
 
-  uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 \\
+  uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 \\
     --with numpy==2.5.5 --with scipy==1.18.1 python -I imgalpha.py remove in.jpg -o out.png
 
 Run it from a folder you trust (see SKILL.md): uv reads pyproject.toml, uv.toml, and .venv

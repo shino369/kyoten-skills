@@ -7,7 +7,7 @@ or renders pixels, keeping sensitive/NSFW game assets safe from accidental viewi
 Run it through the `ge` helper in SKILL.md (`geu` for unity-extract), from a folder you trust, never from inside
 the game folder: uv reads pyproject.toml, uv.toml, and .venv from the folder it runs in.
 
-  uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 \\
+  uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 \\
     python -I game_extract.py detect "<game_dir>" --json
 """
 

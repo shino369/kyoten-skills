@@ -22,7 +22,7 @@ bash / zsh / Git Bash:
 
 ```bash
 IA_PY="/absolute/path/to/transparent-background/scripts/imgalpha.py"
-ia() { uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 python -I "$IA_PY" "$@"; }
+ia() { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 python -I "$IA_PY" "$@"; }
 ia remove in.jpg -o out.png
 ```
 
@@ -30,12 +30,14 @@ PowerShell (`cmd.exe` has no functions, so use PowerShell or Git Bash):
 
 ```powershell
 $IA_PY = 'C:\absolute\path\to\transparent-background\scripts\imgalpha.py'
-function ia { uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 python -I $IA_PY @args }
+function ia { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 python -I $IA_PY @args }
 ia remove in.jpg -o out.png
 ```
 
 `--no-build` installs wheels only (all three packages have them for Python 3.12 on macOS, Linux, and
-Windows). `--no-config` also skips your own uv settings, such as a private index.
+Windows). `--exclude-newer P7D` makes uv ignore files uploaded in the last 7 days, so a file added
+later to a pinned release is not picked up; it needs uv 0.9.17 or later (`uv --version`).
+`--no-config` also skips your own uv settings, such as a private index.
 
 Write colours as `r,g,b` (`--bg 40,96,200`). It needs no quoting in any shell. `#rrggbb` also
 works, but quote it: PowerShell treats a bare `#` as a comment, and `cmd` keeps single quotes.

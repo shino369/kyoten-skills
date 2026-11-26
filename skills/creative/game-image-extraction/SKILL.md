@@ -15,7 +15,7 @@ PowerShell (`cmd.exe` has no functions, so use PowerShell or Git Bash):
 
 ```powershell
 $GE_PY = 'C:\absolute\path\to\game-image-extraction\scripts\game_extract.py'
-function ge { uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 python -I $GE_PY @args }
+function ge { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 python -I $GE_PY @args }
 function geu { uv run --no-project --no-config --exclude-newer P7D --python 3.12 --with UnityPy==1.25.4 --with tpk-ar==0.2.4 --with pillow==13.0.0 --with archspec==0.2.7 --with astc-encoder-py==0.1.12 --with attrs==26.1.0 --with brotli==1.2.1 --with etcpak==0.9.15 --with fmod-toolkit==0.1.3 --with fsspec==2026.9.0 --with lz4==4.4.5 --with pyfmodex==0.7.2 --with texture2ddecoder==1.0.6 python -I $GE_PY @args }
 ```
 
@@ -23,11 +23,11 @@ bash / zsh / Git Bash:
 
 ```bash
 GE_PY="/absolute/path/to/game-image-extraction/scripts/game_extract.py"
-ge() { uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 python -I "$GE_PY" "$@"; }
+ge() { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 python -I "$GE_PY" "$@"; }
 geu() { uv run --no-project --no-config --exclude-newer P7D --python 3.12 --with UnityPy==1.25.4 --with tpk-ar==0.2.4 --with pillow==13.0.0 --with archspec==0.2.7 --with astc-encoder-py==0.1.12 --with attrs==26.1.0 --with brotli==1.2.1 --with etcpak==0.9.15 --with fmod-toolkit==0.1.3 --with fsspec==2026.9.0 --with lz4==4.4.5 --with pyfmodex==0.7.2 --with texture2ddecoder==1.0.6 python -I "$GE_PY" "$@"; }
 ```
 
-`ge` runs every command except `unity-extract`: `detect`, `xp3-inspect`, `xp3-unpack`, `convert-raw` (Pillow lets `psb_parser.py` compose `.pimg` layers), and `verify`. It installs wheels only (`--no-build`). `geu` adds UnityPy for `unity-extract` and pins every package UnityPy pulls in, but it cannot use `--no-build`: UnityPy 1.25.3 and later need `tpk-ar`, which is published only as source, so uv builds it (pure Python, no `setup.py`). `--exclude-newer P7D` makes uv ignore anything uploaded in the last 7 days, including the setuptools that builds `tpk-ar`. UnityPy 1.25.4 has no wheel for Linux on ARM (aarch64), where uv compiles it from source and needs a C++ compiler. `--no-config` also skips your own uv settings, such as a private index.
+`ge` runs every command except `unity-extract`: `detect`, `xp3-inspect`, `xp3-unpack`, `convert-raw` (Pillow lets `psb_parser.py` compose `.pimg` layers), and `verify`. It installs wheels only (`--no-build`). `geu` adds UnityPy for `unity-extract` and pins every package UnityPy pulls in, but it cannot use `--no-build`: UnityPy 1.25.3 and later need `tpk-ar`, which is published only as source, so uv builds it (pure Python, no `setup.py`). In both helpers, `--exclude-newer P7D` makes uv ignore files uploaded in the last 7 days: a file added later to a pinned release is not picked up, and in `geu` it also covers the setuptools that builds `tpk-ar`. It needs uv 0.9.17 or later (`uv --version`). Some of `geu`'s packages have no wheel for every platform: UnityPy 1.25.4 has none for Linux on ARM (aarch64), lz4 4.4.5 none for musl Linux such as Alpine, and etcpak 0.9.15 none for Windows on ARM. There uv compiles them from source, which needs a C/C++ compiler. `--no-config` also skips your own uv settings, such as a private index.
 
 ## Safety & Content-Sensitivity Rules
 
