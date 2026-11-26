@@ -26,10 +26,12 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -992,6 +994,47 @@ def build_p2l_mcp_cmd(
     ]
 
 
+class MCPExitedEarly(RuntimeError):
+    """PSD2Live's MCP process exited before it answered the readiness probe."""
+
+
+_STARTUP_ATTEMPTS_AUTO_PORT = 3
+
+
+def _stop_process(proc: Any) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _install_exit_on_signals() -> dict[int, Any]:
+    """Turn SIGTERM/SIGHUP into SystemExit so cleanup in ``finally`` blocks runs.
+
+    Returns the previous handlers; empty when not on the main thread (Python only
+    allows signal handlers there). SIGKILL cannot be caught.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def _exit(signum: int, _frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    previous: dict[int, Any] = {}
+    for name in ("SIGTERM", "SIGHUP"):
+        signum = getattr(signal, name, None)
+        if signum is not None:
+            previous[signum] = signal.signal(signum, _exit)
+    return previous
+
+
+def _restore_signals(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
 def pick_ephemeral_port() -> int:
     """Return an unused localhost TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1043,7 +1086,7 @@ def wait_for_mcp(
     }
     while time_fn() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"PSD2Live MCP exited early with code {proc.returncode}")
+            raise MCPExitedEarly(f"PSD2Live MCP exited early with code {proc.returncode}")
         req = urllib.request.Request(url, data=probe_body, headers=headers, method="POST")
         try:
             with opener(req, timeout=1.0) as resp:
@@ -1412,10 +1455,12 @@ def run_p2l_pipeline(
         shutil.rmtree(store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
 
+    for stale in [*out_resolved.glob("poses_face*.png"), *out_resolved.glob("poses_sabun*.png")]:
+        stale.unlink()
+
     p2l_resolved = discover_p2l_dir(p2l_dir)
-    actual_port = port if port > 0 else pick_ephemeral_port()
     token = f"p2l_{secrets.token_hex(16)}"
-    cmd = build_p2l_mcp_cmd(p2l_resolved, actual_port, token, store_dir)
+    attempts = 1 if port > 0 else _STARTUP_ATTEMPTS_AUTO_PORT
     popen_kwargs: dict[str, Any] = {"text": True}
     no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     if no_window:
@@ -1425,14 +1470,28 @@ def run_p2l_pipeline(
     stderr_log = out_resolved / "_mcp_stderr.log"
     factory = client_factory or _default_client_factory
     t0 = time.perf_counter()
+    previous_handlers = _install_exit_on_signals()
     try:
         with (
             open(stdout_log, "w", encoding="utf-8") as log_out,
             open(stderr_log, "w", encoding="utf-8") as log_err,
         ):
-            proc = popen_fn(cmd, stdout=log_out, stderr=log_err, **popen_kwargs)
+            proc = None
             try:
-                wait_fn(actual_port, proc, token=token)
+                attempt = 1
+                while True:
+                    # An auto-picked port can be taken before Java binds it: retry on a new one.
+                    actual_port = port if port > 0 else pick_ephemeral_port()
+                    cmd = build_p2l_mcp_cmd(p2l_resolved, actual_port, token, store_dir)
+                    proc = popen_fn(cmd, stdout=log_out, stderr=log_err, **popen_kwargs)
+                    try:
+                        wait_fn(actual_port, proc, token=token)
+                        break
+                    except MCPExitedEarly:
+                        if attempt >= attempts:
+                            raise
+                        _stop_process(proc)
+                        attempt += 1
                 endpoint = f"http://127.0.0.1:{actual_port}/mcp"
                 with factory(p2l_resolved, endpoint, token) as p2l:
                     if layout_path is not None:
@@ -1615,15 +1674,12 @@ def run_p2l_pipeline(
                     )
                     return report
             finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
+                if proc is not None:
+                    _stop_process(proc)
     finally:
         redact_token_in_file(stdout_log, token)
         redact_token_in_file(stderr_log, token)
+        _restore_signals(previous_handlers)
 
 
 # ---------- CLI ----------

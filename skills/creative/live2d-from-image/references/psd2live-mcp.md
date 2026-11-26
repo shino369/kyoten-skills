@@ -24,7 +24,7 @@
      - **Windows portable:** `<dir>/app/`, `<dir>/runtime/bin/java.exe`, `<dir>/mcp_proxy.py`
      - **macOS app bundle:** `/Applications/PSD2Live.app` or `/Applications/PSD2Live.app/Contents` (`Contents/app/`, `Contents/runtime/Contents/Home/bin/java`, `Contents/app/resources/mcp_proxy.py`)
      - **Linux portable:** `<dir>/app/`, `<dir>/runtime/bin/java`, `<dir>/mcp_proxy.py` (or `<dir>/tools/mcp_proxy.py`)
-   - **Bearer token security note:** PSD2Live 3.8.4's `HeadlessMcp` CLI only accepts `--token <T>` as a process argument (no env-var flag). `run-p2l` generates a fresh random per-run token, uses an ephemeral localhost port (`--port 0`), verifies readiness with an authenticated JSON-RPC `initialize` probe, and redacts the token (`<REDACTED>`) from `_mcp_stdout.log` and `_mcp_stderr.log` on exit.
+   - **Bearer token security note:** PSD2Live 3.8.4's `HeadlessMcp` CLI only accepts `--token <T>` as a process argument (no env-var flag). `run-p2l` generates a fresh random per-run token, uses an ephemeral localhost port (`--port 0`), verifies readiness with an authenticated JSON-RPC `initialize` probe, and redacts the token (`<REDACTED>`) from `_mcp_stdout.log` and `_mcp_stderr.log` on exit. If PSD2Live exits before answering on an auto-picked port (the port was taken in between), it retries on a new port, up to 3 starts; an explicit `--port` is never changed. Ctrl+C, SIGTERM, and SIGHUP also stop the Java process and redact the logs. SIGKILL cannot be caught: after `kill -9`, stop the leftover PSD2Live Java process yourself and redact or delete `_mcp_*.log`.
 
 ## `layout.json` (`psd2live-layout` v1)
 

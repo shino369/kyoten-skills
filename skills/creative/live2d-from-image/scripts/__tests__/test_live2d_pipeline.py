@@ -1400,6 +1400,9 @@ def test_run_p2l_pipeline_ephemeral_port_redaction_extra_poses_and_modes(tmp_pat
 
     out_dir = tmp_path / "out_layout"
     (out_dir / "_mcp_store").mkdir(parents=True)
+    # N8: sheets from an earlier run with fewer/more poses must not survive
+    for stale in ("poses_face.png", "poses_face_3.png", "poses_sabun.png"):
+        (out_dir / stale).write_bytes(b"old")
 
     # F10: Simulate PSD2Live printing bearer token into stdout & stderr logs; must be redacted!
     seen_tokens: list[str] = []
@@ -1455,6 +1458,13 @@ def test_run_p2l_pipeline_ephemeral_port_redaction_extra_poses_and_modes(tmp_pat
     assert {"ParamAngleX": -25.0, "ParamAngleY": 10.0} in face_poses_all
     assert (out_dir / "poses_face_1.png").exists()
     assert (out_dir / "poses_face_2.png").exists()
+    assert sorted(p.name for p in out_dir.glob("poses_*.png")) == [
+        "poses_face_1.png",
+        "poses_face_2.png",
+        "poses_full.png",
+        "poses_sabun_1.png",
+        "poses_sabun_2.png",
+    ]
 
     assert report["exports"]["moc3"]["ok"] is True
     assert report["exports"]["gif"]["ok"] is False
@@ -1579,6 +1589,167 @@ def test_run_p2l_pipeline_ephemeral_port_redaction_extra_poses_and_modes(tmp_pat
 
     # Redact helper no-op on missing file
     lp.redact_token_in_file(tmp_path / "missing_log.txt", "tok")
+
+
+class _StopTrackingProc:
+    def __init__(self):
+        self.terminated = False
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=5):
+        pass
+
+
+def _minimal_p2l_inputs(tmp_path: Path) -> dict[str, Path]:
+    p2l_dir = tmp_path / "p2l"
+    (p2l_dir / "app").mkdir(parents=True, exist_ok=True)
+    layout_path = tmp_path / "layout.json"
+    layout_path.write_text("{}", encoding="utf-8")
+    return {"p2l_dir": p2l_dir, "layout_path": layout_path}
+
+
+def test_run_p2l_pipeline_retries_auto_port_when_mcp_exits_early(tmp_path: Path, monkeypatch):
+    # N8: the auto-picked port can be taken before Java binds it; retry on a new port.
+    ports = iter([5001, 5002, 5003, 5004])
+    monkeypatch.setattr(lp, "pick_ephemeral_port", lambda: next(ports))
+    procs: list[_StopTrackingProc] = []
+    seen_ports: list[int] = []
+
+    def popen(cmd, **_kw):
+        seen_ports.append(int(cmd[cmd.index("--port") + 1]))
+        procs.append(_StopTrackingProc())
+        return procs[-1]
+
+    def wait_once_early(port, proc, **_kw):
+        if port == 5001:
+            raise lp.MCPExitedEarly("PSD2Live MCP exited early with code 1")
+
+    report = lp.run_p2l_pipeline(
+        out_dir=tmp_path / "out",
+        name="hero",
+        **_minimal_p2l_inputs(tmp_path),
+        popen_fn=popen,
+        wait_fn=wait_once_early,
+        client_factory=lambda *_a: FakeP2LClient(),
+    )
+
+    assert report["name"] == "hero"
+    assert seen_ports == [5001, 5002]
+    assert all(p.terminated for p in procs)
+
+
+def test_run_p2l_pipeline_gives_up_after_three_early_exits(tmp_path: Path, monkeypatch):
+    ports = iter([6001, 6002, 6003, 6004])
+    monkeypatch.setattr(lp, "pick_ephemeral_port", lambda: next(ports))
+    seen_ports: list[int] = []
+
+    def popen(cmd, **_kw):
+        seen_ports.append(int(cmd[cmd.index("--port") + 1]))
+        return _StopTrackingProc()
+
+    def always_early(*_a, **_kw):
+        raise lp.MCPExitedEarly("PSD2Live MCP exited early with code 1")
+
+    with pytest.raises(lp.MCPExitedEarly):
+        lp.run_p2l_pipeline(
+            out_dir=tmp_path / "out",
+            name="hero",
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=always_early,
+            client_factory=lambda *_a: FakeP2LClient(),
+        )
+    assert seen_ports == [6001, 6002, 6003]
+
+    # An explicit --port is the user's choice: no retry on another port.
+    seen_ports.clear()
+    with pytest.raises(lp.MCPExitedEarly):
+        lp.run_p2l_pipeline(
+            out_dir=tmp_path / "out_fixed",
+            name="hero",
+            port=7123,
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=always_early,
+            client_factory=lambda *_a: FakeP2LClient(),
+        )
+    assert seen_ports == [7123]
+
+
+def test_run_p2l_pipeline_sigterm_stops_mcp_and_redacts_logs(tmp_path: Path):
+    # N8: SIGTERM must run the cleanup (stop Java, redact the token) and restore handlers.
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    proc = _StopTrackingProc()
+    tokens: list[str] = []
+
+    def popen(cmd, stdout=None, **_kw):
+        tokens.append(cmd[cmd.index("--token") + 1])
+        stdout.write(f"token={tokens[0]}\n")
+        return proc
+
+    class SignalledClient(FakeP2LClient):
+        def edit(self, tool: str, **kwargs):
+            signal.raise_signal(signal.SIGTERM)
+            return super().edit(tool, **kwargs)
+
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit) as exc:
+        lp.run_p2l_pipeline(
+            out_dir=out,
+            name="hero",
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=lambda *a, **kw: None,
+            client_factory=lambda *_a: SignalledClient(),
+        )
+
+    assert exc.value.code == 128 + signal.SIGTERM
+    assert proc.terminated
+    log = (out / "_mcp_stdout.log").read_text(encoding="utf-8")
+    assert tokens[0] not in log and "<REDACTED>" in log
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_exit_on_signals_skips_off_main_thread_and_missing_signals(monkeypatch):
+    import signal
+    import threading
+
+    box: list[dict] = []
+    t = threading.Thread(target=lambda: box.append(lp._install_exit_on_signals()))
+    t.start()
+    t.join()
+    assert box == [{}]
+
+    monkeypatch.delattr(lp.signal, "SIGHUP", raising=False)  # e.g. Windows
+    before = signal.getsignal(signal.SIGTERM)
+    previous = lp._install_exit_on_signals()
+    try:
+        assert list(previous) == [signal.SIGTERM]
+    finally:
+        lp._restore_signals(previous)
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_run_p2l_pipeline_propagates_popen_failure(tmp_path: Path):
+    def popen(*_a, **_kw):
+        raise OSError("java not found")
+
+    with pytest.raises(OSError, match="java not found"):
+        lp.run_p2l_pipeline(
+            out_dir=tmp_path / "out",
+            name="hero",
+            **_minimal_p2l_inputs(tmp_path),
+            popen_fn=popen,
+            wait_fn=lambda *a, **kw: None,
+            client_factory=lambda *_a: FakeP2LClient(),
+        )
 
 
 def test_default_loaders(tmp_path: Path, monkeypatch):
