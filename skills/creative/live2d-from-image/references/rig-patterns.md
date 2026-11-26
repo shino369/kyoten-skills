@@ -34,7 +34,7 @@ Game sprite rips (Unity/KiriKiri/Naninovel) often lack pivot metadata and mix di
    - Do **not** tag a fused single-layer eye sprite (containing sclera + iris + lash in one PNG) as `["eye", "iris"]` or `["eye", "white"]`: PSD2Live's blink deformer squashes eyelids while leaving a single `iris` mesh visible behind the closed lid.
    - For **live open eyes**, use the 1280px head-pass See-through layers (`eyewhite`, `irides`, `eyelash`) with native-pixel re-projection so gaze tracking, clipping, and blinking work independently.
    - For **static closed-eye expression sprites** (Smile, Gloom), tag them as `["object"]`, bind them to the face contour deformer (`顔デフォーマ`), and add a 2D opacity gate (Pattern 3 below).
-   - When splitting bilateral eye/brow sprites with `split-eyes`, verify stderr `warnings`: on three-quarter faces, `split_eyes_and_brows` uses per-side relative geometry above each eye anchor and warns whenever a side has no separate brow component.
+   - When splitting bilateral eye/brow sprites with `split-eyes`, verify stderr `warnings`: on three-quarter faces, `split_eyes_and_brows` uses per-side relative geometry above each eye anchor and warns whenever a side has no separate brow component. Components that are neither brow nor eye (hair strands, a brow too slanted to fit the brow height limit) are attached to the nearest of the two, with a warning when they are not dust; check those parts by eye.
 
 ## 3. Live Open-Eye Expressions + Blink-Immune Closed-Eye Expressions
 

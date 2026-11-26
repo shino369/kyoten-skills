@@ -179,14 +179,19 @@ def split_eyes_and_brows(
     alpha_threshold: int = 8,
     min_px: int = 10,
     brow_max_h_ratio: float = 0.34,
+    dust_ratio: float = 0.1,
     warnings: list[str] | None = None,
 ) -> dict[str, tuple[Path, tuple[int, int], dict[str, float]]]:
     """Split a bilateral eye PNG into character right/left eyes and right/left brows.
 
     Uses per-side relative geometry with dust-speck filtering and per-column
     vertical gap checks so three-quarter views and curved anime brows whose
-    outer tips dip below the eye arch classify accurately. Appends a warning to
-    ``warnings`` whenever a side has an eye without a detected brow.
+    outer tips dip below the eye arch classify accurately. A component smaller than
+    ``dust_ratio`` of the feature it is compared with does not decide which part is
+    the brow. Components that end up in neither the brow nor the eye are attached to
+    the nearest of the two. Appends a warning to ``warnings`` whenever a side has an
+    eye without a detected brow, or a component of at least ``dust_ratio`` of the brow
+    seed had to be attached that way.
 
     Character's right = viewer's left (x < mid_x).
     Character's left  = viewer's right (x >= mid_x).
@@ -244,22 +249,32 @@ def split_eyes_and_brows(
         comps_sorted = sorted(comps, key=lambda c: (c["y_min"], c["y_center"]))
         largest = max(comps_sorted, key=lambda c: c["area"])
         below_largest = [c for c in comps_sorted if c["y_min"] - largest["y_max"] >= min_brow_gap]
-        if largest is comps_sorted[0] and largest["height"] <= max_brow_h and below_largest:
-            main_eye = max(below_largest, key=lambda c: c["area"])
+        above_largest = comps_sorted[: next(i for i, c in enumerate(comps_sorted) if c is largest)]
+        # Thick brow over a thin closed lid: the largest component is the brow when
+        # nothing but dust lies above it and something sits below it.
+        lid = max(below_largest, key=lambda c: c["area"]) if below_largest else None
+        if (
+            lid is not None
+            and largest["height"] <= max_brow_h
+            and all(c["area"] < dust_ratio * lid["area"] for c in above_largest)
+        ):
+            main_eye = lid
         else:
             main_eye = largest
         min_seed_area = max(min_px, int(main_eye["area"] * 0.015))
-        seed = next(
-            (
-                c
-                for c in comps_sorted
-                if c is not main_eye
-                and c["area"] >= min_seed_area
-                and c["height"] <= max_brow_h
-                and c["y_min"] < main_eye["y_min"]
-            ),
-            None,
-        )
+        seed_cands = [
+            c
+            for c in comps_sorted
+            if c is not main_eye
+            and c["area"] >= min_seed_area
+            and c["height"] <= max_brow_h
+            and c["y_min"] < main_eye["y_min"]
+        ]
+        seed: dict[str, Any] | None = None
+        if seed_cands:
+            # Topmost brow-like component, skipping dust relative to the biggest one.
+            biggest_area = max(c["area"] for c in seed_cands)
+            seed = next(c for c in seed_cands if c["area"] >= dust_ratio * biggest_area)
         brow_group: list[dict[str, Any]] = []
         if seed is not None:
             brow_band_max = seed["y_max"] + max(4, seed["height"])
@@ -299,6 +314,19 @@ def split_eyes_and_brows(
                 buckets[f"brow_{side}"] |= comp["mask"]
             for comp in eye_below:
                 buckets[f"eye_{side}"] |= comp["mask"]
+            placed = brow_ids | {id(c) for c in eye_below}
+            leftovers = [c for c in comps_sorted if id(c) not in placed]
+            if leftovers:
+                dist = {
+                    key: ndimage.distance_transform_edt(~buckets[key]) for key in (f"brow_{side}", f"eye_{side}")
+                }
+                for comp in leftovers:
+                    key = min(dist, key=lambda k: float(dist[k][comp["mask"]].min()))
+                    buckets[key] |= comp["mask"]
+                    if warnings is not None and comp["area"] >= dust_ratio * seed["area"]:
+                        warnings.append(
+                            f"Side '{side}': {comp['area']} px were neither brow nor eye; attached to {key}"
+                        )
         else:
             for comp in comps_sorted:
                 buckets[f"eye_{side}"] |= comp["mask"]

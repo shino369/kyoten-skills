@@ -290,7 +290,8 @@ def test_split_eyes_and_brows_front_three_quarter_and_warnings(tmp_path: Path):
         curved_src, out_parts, "cv", {"left": 0.0, "top": 0.0, "width": 220.0, "height": 120.0}, warnings=warns_cv
     )
     assert set(res_cv.keys()) == {"eye_r", "eye_l", "brow_r", "brow_l"}
-    assert res_cv["brow_r"][2]["top"] == 10.0 and res_cv["brow_r"][2]["height"] == 25.0
+    # N5: the speck is not dropped either; it joins the nearest bucket (the brow).
+    assert res_cv["brow_r"][2]["top"] == 1.0 and res_cv["brow_r"][2]["height"] == 34.0
     # r3-1: Above-brow dust speck must NOT be merged into eye_r!
     assert res_cv["eye_r"][2]["top"] == 26.0 and res_cv["eye_r"][2]["height"] == 64.0
     assert res_cv["brow_l"][2]["top"] == 10.0
@@ -337,6 +338,61 @@ def test_split_eyes_and_brows_front_three_quarter_and_warnings(tmp_path: Path):
     assert lp.split_eyes_and_brows(
         empty_src, out_parts, "empty", {"left": 0.0, "top": 0.0, "width": 60.0, "height": 60.0}
     ) == {}
+
+
+def _split_full(tmp_path: Path, arr: np.ndarray, prefix: str, warns: list[str]):
+    src = tmp_path / f"{prefix}.png"
+    Image.fromarray(arr).save(src)
+    h, w = arr.shape[:2]
+    rect = {"left": 0.0, "top": 0.0, "width": float(w), "height": float(h)}
+    return lp.split_eyes_and_brows(src, tmp_path / "parts", prefix, rect, warnings=warns)
+
+
+def _opaque_px(res) -> int:
+    return sum(int((np.array(Image.open(p))[:, :, 3] > 8).sum()) for p, _sz, _r in res.values())
+
+
+def test_split_eyes_and_brows_ignores_dust_speck_above_thick_brow(tmp_path: Path):
+    # N4: a 4x4 speck above a thick brow must not become the brow seed (which made
+    # the brow + closed lid the "eye").
+    arr = np.zeros((100, 200, 4), dtype=np.uint8)
+    arr[10:19, 20:70] = (40, 30, 30, 255)  # thick brow
+    arr[55:59, 25:70] = (20, 20, 20, 255)  # thin closed lid
+    arr[2:6, 40:44] = (40, 30, 30, 255)  # dust speck
+    warns: list[str] = []
+
+    res = _split_full(tmp_path, arr, "speck", warns)
+
+    assert res["eye_r"][2] == {"left": 25.0, "top": 55.0, "width": 45.0, "height": 4.0}
+    assert res["brow_r"][2] == {"left": 20.0, "top": 2.0, "width": 50.0, "height": 17.0}
+    assert _opaque_px(res) == int((arr[:, :, 3] > 8).sum())
+    assert warns == []
+
+
+def test_split_eyes_and_brows_reattaches_components_above_seed(tmp_path: Path):
+    # N5: a speck above the brow and a tall hair strand are neither brow nor eye;
+    # they go to the nearest bucket instead of being dropped, and a large one warns.
+    arr = np.zeros((200, 400, 4), dtype=np.uint8)
+    for off in (0, 200):
+        arr[40:52, 40 + off : 160 + off] = (50, 30, 20, 255)  # brow
+        arr[80:150, 50 + off : 150 + off] = (50, 30, 20, 255)  # eye
+    arr[20:25, 100:105] = (50, 30, 20, 255)  # speck above right brow
+    arr[10:190, 20:30] = (50, 30, 20, 255)  # tall strand left of right brow
+    arr[40:52, 300:360] = 0  # shorter left brow ...
+    arr[30:150, 360:366] = (50, 30, 20, 255)  # ... so this strand is nearest the left eye
+    warns: list[str] = []
+
+    res = _split_full(tmp_path, arr, "strand", warns)
+
+    assert _opaque_px(res) == int((arr[:, :, 3] > 8).sum())
+    assert res["brow_r"][2]["left"] == 20.0
+    assert res["brow_r"][2]["top"] == 10.0
+    assert res["brow_l"][2] == {"left": 240.0, "top": 40.0, "width": 60.0, "height": 12.0}
+    assert res["eye_l"][2] == {"left": 250.0, "top": 30.0, "width": 116.0, "height": 120.0}
+    assert warns == [
+        "Side 'r': 1800 px were neither brow nor eye; attached to brow_r",
+        "Side 'l': 720 px were neither brow nor eye; attached to eye_l",
+    ]
 
 
 # ---------- Single-image alpha-residual recovery (Case 2B) ----------
