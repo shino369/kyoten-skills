@@ -5,7 +5,7 @@ Reusable [Agent Skills](https://skills.sh) originally built for the
 
 - `skills/dependencies/` — pnpm dependency and security maintenance (included in `kyoten` by default)
 - `skills/translation/` — EN ↔ JA ↔ zh-TW trilingual translation (included in `kyoten` by default)
-- `skills/creative/` — image cutout/recolouring, Unity/KiriKiri game image extraction, and image-to-Live2D rigging (opt-in)
+- `skills/creative/` — image cutout/recolouring, Unity/KiriKiri game image extraction, PSD flat-colour cleanup, and image-to-Live2D rigging (opt-in)
 
 ## Install
 
@@ -21,6 +21,7 @@ npx skills add shino369/kyoten-skills --skill dependency-update security-update 
 # Install opt-in creative skills on demand
 npx skills add shino369/kyoten-skills --skill transparent-background
 npx skills add shino369/kyoten-skills --skill game-image-extraction
+npx skills add shino369/kyoten-skills --skill psd-flats-cleanup
 npx skills add shino369/kyoten-skills --skill live2d-from-image
 ```
 
@@ -29,6 +30,7 @@ Using `pnpm` (e.g. inside `kyoten`):
 ```bash
 pnpm dlx skills add shino369/kyoten-skills --skill transparent-background --agent claude-code codex -y
 pnpm dlx skills add shino369/kyoten-skills --skill game-image-extraction --agent claude-code codex -y
+pnpm dlx skills add shino369/kyoten-skills --skill psd-flats-cleanup --agent claude-code codex -y
 pnpm dlx skills add shino369/kyoten-skills --skill live2d-from-image --agent claude-code codex -y
 ```
 
@@ -51,11 +53,12 @@ pnpm dlx skills add shino369/kyoten-skills --skill live2d-from-image --agent cla
 
 Not installed by default during `kyoten` initialization; install individually when needed.
 
-| Skill                                                                       | Description                                                                                                            | Runtime                                                                    |
-| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [`transparent-background`](skills/creative/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes.               | `uv` (Python 3.12 + Pillow, NumPy, SciPy)                                  |
-| [`game-image-extraction`](skills/creative/game-image-extraction/SKILL.md)   | Extract, convert, and verify images from Unity (`*_Data`/Addressables) and KiriKiri2/Z (`.xp3`/TLG/PSB-PIMG) games.    | `uv` (Python 3.12 + Pillow, optional `UnityPy`)                            |
-| [`live2d-from-image`](skills/creative/live2d-from-image/SKILL.md)           | Turn illustrations or sprite parts into Live2D Cubism v5 models (`.moc3`, VTS, WebGL, GIF) via See-through + PSD2Live. | `uv` (Python 3.12 + Pillow, NumPy, SciPy, `psd-tools`), PSD2Live, Node 24+ |
+| Skill                                                                       | Description                                                                                                                                                                                                                       | Runtime                                                                    |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| [`transparent-background`](skills/creative/transparent-background/SKILL.md) | Turn flat-background images into clean transparent PNGs, fix halos/specks, and recolour separate shapes.                                                                                                                          | `uv` (Python 3.12 + Pillow, NumPy, SciPy)                                  |
+| [`game-image-extraction`](skills/creative/game-image-extraction/SKILL.md)   | Extract, convert, and verify images from Unity (`*_Data`/Addressables) and KiriKiri2/Z (`.xp3`/TLG/PSB-PIMG) games.                                                                                                               | `uv` (Python 3.12 + Pillow, optional `UnityPy`)                            |
+| [`psd-flats-cleanup`](skills/creative/psd-flats-cleanup/SKILL.md)           | Clean up rough flats in a layered PSD so the paint follows the lineart; writes an editable PSD copy and a review PNG. By [staryume](https://github.com/staryume) ([Coloring Helper](https://github.com/staryume/ColoringHelper)). | `uv` (Python 3.12 + `psd-tools`, Pillow, NumPy, SciPy)                     |
+| [`live2d-from-image`](skills/creative/live2d-from-image/SKILL.md)           | Turn illustrations or sprite parts into Live2D Cubism v5 models (`.moc3`, VTS, WebGL, GIF) via See-through + PSD2Live.                                                                                                            | `uv` (Python 3.12 + Pillow, NumPy, SciPy, `psd-tools`), PSD2Live, Node 24+ |
 
 ## Development & Verification
 
