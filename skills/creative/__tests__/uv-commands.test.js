@@ -13,7 +13,7 @@ const repoRoot = join(creativeDir, '..', '..');
 
 // The only options a documented command may use. Anything else (short flags,
 // --index, --with-requirements, ...) fails, so it cannot hide an unpinned
-// install or another index.
+// install or another index (UV_SETTING keeps an index out of the environment).
 const VALUE_OPTIONS = new Set(['--python', '--with', '--exclude-newer']);
 const FLAG_OPTIONS = new Set([
   '--no-project',
@@ -28,7 +28,18 @@ const SOURCE_ONLY = new Set(['tpk-ar']);
 const MIN_AGE_DAYS = 7;
 const PINNED =
   /^([A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9,._-]+\])?==(\d[\w.+!-]*)$/;
-const OTHER_INSTALLERS = /\buvx\b|\buv tool (?:run|install)\b|\bpip install\b/;
+// A uv call: `uv` (or `uv.exe`, a path, a closing quote) followed by an option
+// or a subcommand. Prose such as "uv reads pyproject.toml" is not one.
+const UV_SUBCOMMANDS =
+  'run|init|add|remove|version|sync|lock|export|tree|format|tool|python|pip|venv|build|publish|cache|self|auth|help';
+const UV_CALL = new RegExp(
+  `\\buv(?:\\.exe)?["']?\\s+(?=-|(?:${UV_SUBCOMMANDS})\\b)`,
+  'g'
+);
+// uv still reads UV_* variables (UV_INDEX_URL, UV_DEFAULT_INDEX, ...) under
+// --no-config. Windows names ignore case, so any case counts.
+const UV_SETTING = /\bUV_\w+/i;
+const OTHER_INSTALLERS = /\buvx\b|\bpip[\dx.]*\s+(?:install|run)\b/;
 
 function stripQuotes(token) {
   return token.replace(/^['"]|['"]$/g, '');
@@ -53,11 +64,6 @@ function fencedBlocks(markdown) {
   return blocks;
 }
 
-/** The module docstring of a Python file. */
-function docstring(python) {
-  return python.match(/^(?:#!.*\r?\n)?\s*"""([\s\S]*?)"""/)?.[1] ?? '';
-}
-
 /** Joins bash `\`, PowerShell backtick, and Python-source `\\` continuations. */
 function logicalLines(lines) {
   const joined = [];
@@ -76,16 +82,29 @@ function logicalLines(lines) {
   return joined;
 }
 
+/**
+ * The lines a file tells agents to run: the fenced code of Markdown, and all
+ * of a Python file (docstrings, error messages, and help text alike).
+ */
+function commandLines(path, text) {
+  const blocks = path.endsWith('.md')
+    ? fencedBlocks(text)
+    : [text.split(/\r?\n/)];
+  return blocks.flatMap(logicalLines);
+}
+
+/** Every uv call in the lines, each up to the next one on its line. */
 function uvCommands(lines) {
   return lines.flatMap((line) => {
-    const at = line.indexOf('uv run ');
-    return at === -1 ? [] : [line.slice(at)];
+    const starts = [...line.matchAll(UV_CALL)].map(({ index }) => index);
+    return starts.map((start, n) => line.slice(start, starts[n + 1]).trimEnd());
   });
 }
 
 /** Splits `uv run` into its options, the options it does not allow, and the program. */
 function parseUvRun(command) {
-  const tokens = command.split(/\s+/).slice(2).map(stripQuotes);
+  const [, subcommand, ...rest] = command.split(/\s+/);
+  const tokens = rest.map(stripQuotes);
   const options = [];
   const unknown = [];
   let i = 0;
@@ -100,7 +119,7 @@ function parseUvRun(command) {
       unknown.push(tokens[i]);
     }
   }
-  return { options, unknown, program: tokens[i] };
+  return { subcommand, options, unknown, program: tokens[i] };
 }
 
 function isOldEnough(value) {
@@ -110,7 +129,10 @@ function isOldEnough(value) {
 
 /** What a documented uv command gets wrong; empty when it is safe. */
 function uvProblems(command, { allowQuiet = false } = {}) {
-  const { options, unknown, program } = parseUvRun(command);
+  const { subcommand, options, unknown, program } = parseUvRun(command);
+  // Options before `run` and other subcommands (pip, tool, sync, ...) skip
+  // every check below, so only `uv run` itself is allowed.
+  if (subcommand !== 'run') return [`expected uv run, got uv ${subcommand}`];
   const flags = new Set(options.map(([flag]) => flag));
   const specs = options
     .filter(([flag]) => flag === '--with')
@@ -163,19 +185,10 @@ const SAFE =
   'uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12';
 
 const docs = readdirSync(creativeDir, { recursive: true })
-  .filter((path) => {
-    const parts = path.split(/[\\/]/);
-    return (
-      path.endsWith('.md') ||
-      (path.endsWith('.py') && parts.at(-2) === 'scripts')
-    );
-  })
+  .filter((path) => path.endsWith('.md') || path.endsWith('.py'))
   .map((path) => {
     const text = readFileSync(join(creativeDir, path), 'utf8');
-    const blocks = path.endsWith('.md')
-      ? fencedBlocks(text)
-      : [docstring(text).split(/\r?\n/)];
-    return { path, text, lines: blocks.flatMap(logicalLines) };
+    return { path, text, lines: commandLines(path, text) };
   });
 
 const { scripts } = JSON.parse(
@@ -240,6 +253,15 @@ describe('uvProblems', () => {
     ]);
   });
 
+  test('flags any uv call that is not uv run itself', () => {
+    expect(uvProblems(`uv --quiet run --no-project python a.py`)).toEqual([
+      'expected uv run, got uv --quiet',
+    ]);
+    expect(uvProblems(`uv.exe" pip install pillow`)).toEqual([
+      'expected uv run, got uv pip',
+    ]);
+  });
+
   test('allows --quiet only when asked', () => {
     const quiet = `${SAFE} --quiet python -m pytest`;
 
@@ -285,12 +307,65 @@ describe('finding commands', () => {
     ]);
   });
 
-  test('reads the module docstring after a shebang', () => {
+  test('reads all of a Python file but only the fenced code of Markdown', () => {
     const python =
-      '#!/usr/bin/env python3\n"""Doc.\n\n  uv run x\n"""\nX = """not this"""\n';
+      '"""Doc.\n\n  uv run --with a==1 \\\\\n    python x.py\n"""\nraise SystemExit("uv run --with b python")\n';
+    const markdown =
+      'uv run --with c python\n```\nuv run --with d python\n```\n';
 
-    expect(docstring(python)).toBe('Doc.\n\n  uv run x\n');
-    expect(docstring('import os\n')).toBe('');
+    expect(uvCommands(commandLines('x.py', python))).toEqual([
+      'uv run --with a==1 python x.py',
+      'uv run --with b python")',
+    ]);
+    expect(uvCommands(commandLines('x.md', markdown))).toEqual([
+      'uv run --with d python',
+    ]);
+  });
+
+  test('finds every uv call on a line, in any string, but not prose', () => {
+    const lines = [
+      `${SAFE} python a.py && uv run --with pillow python b.py`,
+      'raise RuntimeError("Run with: uv run --with UnityPy python x.py")',
+      'uv --quiet run python c.py; & "C:\\bin\\uv.exe" pip install x',
+      '/usr/local/bin/uv  run python d.py',
+      'Prose: uv reads pyproject.toml, then uv, uvx, and uv_dir.',
+    ];
+
+    expect(uvCommands(lines)).toEqual([
+      `${SAFE} python a.py &&`,
+      'uv run --with pillow python b.py',
+      'uv run --with UnityPy python x.py")',
+      'uv --quiet run python c.py; & "C:\\bin\\',
+      'uv.exe" pip install x',
+      'uv  run python d.py',
+    ]);
+  });
+
+  test('flags uv settings passed through the environment', () => {
+    const lines = [
+      `UV_INDEX_URL=https://mirror.test/simple ${SAFE} python a.py`,
+      'export UV_DEFAULT_INDEX=https://mirror.test/simple',
+      '$env:uv_extra_index_url = "https://mirror.test/simple"',
+      `${SAFE} --with numpy==2.5.5 python -I a.py`,
+    ];
+
+    expect(lines.filter((line) => UV_SETTING.test(line))).toEqual(
+      lines.slice(0, 3)
+    );
+  });
+
+  test('flags installers other than uv run', () => {
+    const lines = [
+      'uvx ruff check skills',
+      'python -m pip install pillow',
+      'pip3 install pillow',
+      'pipx run ruff',
+      `${SAFE} --with pillow==13.0.0 python -I a.py`,
+    ];
+
+    expect(lines.filter((line) => OTHER_INSTALLERS.test(line))).toEqual(
+      lines.slice(0, 4)
+    );
   });
 
   test('reports a package pinned to two versions', () => {
@@ -347,6 +422,15 @@ describe('creative skill docs', () => {
   );
 
   test.each(docs.map(({ path }) => path))(
+    '%s passes no uv settings through the environment',
+    (path) => {
+      const { lines } = docs.find((doc) => doc.path === path);
+
+      expect(lines.filter((line) => UV_SETTING.test(line))).toEqual([]);
+    }
+  );
+
+  test.each(docs.map(({ path }) => path))(
     '%s never finds a script through the current repository',
     (path) => {
       const { text } = docs.find((doc) => doc.path === path);
@@ -373,4 +457,12 @@ describe('package.json test scripts', () => {
   test.each(uvScripts)('%s isolates and pins its uv run', (_name, command) => {
     expect(uvProblems(command, { allowQuiet: true })).toEqual([]);
   });
+
+  test.each(Object.entries(scripts))(
+    '%s installs nothing except through uv run',
+    (_name, command) => {
+      expect(command).not.toMatch(OTHER_INSTALLERS);
+      expect(command).not.toMatch(UV_SETTING);
+    }
+  );
 });
