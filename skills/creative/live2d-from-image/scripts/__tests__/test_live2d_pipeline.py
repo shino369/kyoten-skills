@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
 import sys
 import urllib.error
@@ -1109,6 +1110,12 @@ class FakeP2LClient:
 def test_recorded_mcp_contract_fixture(tmp_path: Path):
     """F8: Replay recorded PSD2Live 3.8.4 MCP response shapes through apply_post_rig + run_p2l_pipeline."""
     fixture = json.loads((FIXTURES_DIR / "p2l_contract_fixture.json").read_text(encoding="utf-8"))
+    # N6: the recorded IdTruncated loss. PSD2Live writes the first 63 bytes of the ID
+    # into the 64-byte .moc3 record, but physics3.json keeps the full ID.
+    dropped = next(l for l in fixture["export_moc3_with_losses"]["losses"] if l["handling"] == "dropped")
+    full_id = dropped["object"]
+    written_id = re.search(r"writtenId=([^)]+)\)", dropped["note"]).group(1)
+    assert len(full_id.encode()) > 64 and full_id.startswith(written_id) and len(written_id) == 63
 
     class RecordedFixtureClient:
         def __init__(self):
@@ -1141,7 +1148,13 @@ def test_recorded_mcp_contract_fixture(tmp_path: Path):
             if tool == "project_export_target":
                 out_dir = Path(kwargs["output_directory"])
                 if kwargs["target"] in ("moc3", "vtube-studio"):
-                    _write_valid_moc3_package(out_dir, stem="layout", vtube=(kwargs["target"] == "vtube-studio"))
+                    _write_valid_moc3_package(
+                        out_dir,
+                        stem="layout",
+                        param_ids=[written_id, "ParamAngleX"],
+                        physics_outputs=[full_id, "ParamAngleX"],
+                        vtube=(kwargs["target"] == "vtube-studio"),
+                    )
                     return fixture["export_moc3_with_losses"]
             return {"ok": True}
 
@@ -1196,10 +1209,21 @@ def test_recorded_mcp_contract_fixture(tmp_path: Path):
     motion_edit = next(kw for t, kw in client_box[0].edits if t == "motion_put")
     assert motion_edit["clip"]["curves"][0]["keys"][0]["value"] == pytest.approx(14.3)
     # F2: Export losses surfaced
-    assert report["export_losses"]["total_dropped"] == 2  # moc3 + vtube-studio
-    assert report["export_losses"]["total_approximated"] == 2
-    assert report["moc3_validation"]["ok"] is True
-    assert report["vts_validation"]["ok"] is True
+    # The fixture's one dropped and one approximated loss, reported once per target.
+    by_target = report["export_losses"]["by_target"]
+    assert {t: (v["dropped"], v["approximated"]) for t, v in by_target.items()} == {
+        "moc3": (1, 1),
+        "vtube-studio": (1, 1),
+        "web": (0, 0),
+        "gif": (0, 0),
+    }
+    assert report["export_losses"]["total_dropped"] == 2
+    # The truncated ID disconnects the physics output; validation must name it.
+    for key in ("moc3_validation", "vts_validation"):
+        val = report[key]
+        assert val["ok"] is True
+        assert val["physics_unmatched_outputs"] == [full_id]
+        assert "physics3.json has 1 output parameter ID(s) not present in .moc3" in val["warnings"]
 
 
 def test_apply_post_rig_full_order_and_warnings():
