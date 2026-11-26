@@ -470,6 +470,62 @@ def test_build_single_image_layout_native_resolution_and_recovery(tmp_path: Path
     assert "shoes_recovered" in land_ids
 
 
+def _seethrough_layer_from(native: np.ndarray, res: int, erode_px: int) -> FakePSDLayer:
+    """Simulate a See-through layer: native art resized to the res grid, edge eroded."""
+    from scipy import ndimage
+
+    small = np.array(Image.fromarray(native).resize((res, res), Image.Resampling.LANCZOS))
+    alpha = ndimage.binary_erosion(small[:, :, 3] > 128, iterations=erode_px)
+    small[:, :, 3] = np.where(alpha, 255, 0)
+    ys, xs = np.where(alpha)
+    bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    crop = Image.fromarray(small[bbox[1] : bbox[3], bbox[0] : bbox[2]])
+    return FakePSDLayer("face", bbox, crop)
+
+
+@pytest.mark.parametrize("reproject", [True, False])
+def test_build_single_image_layout_scales_thresholds_to_native_resolution(tmp_path: Path, reproject: bool):
+    # N3: a 1-2 grid-px See-through edge mismatch is 4-8 native px on a source 4x the
+    # grid. Thresholds tuned on the grid must not turn that edge into fake recovered parts.
+    n, res = 800, 200
+    yy, xx = np.mgrid[0:n, 0:n]
+    body = ((xx - 400) ** 2 + (yy - 230) ** 2 < 190**2) | ((abs(xx - 400) < 160) & (yy > 380) & (yy < 780))
+    art = np.zeros((n, n, 4), dtype=np.uint8)
+    art[body] = (200, 150, 120, 255)
+    src = tmp_path / "big.png"
+    Image.fromarray(art).save(src)
+
+    for erode in (1, 2):
+        layer = _seethrough_layer_from(art, res, erode)
+        m = lp.build_single_image_layout(
+            src,
+            tmp_path / "big.psd",
+            tmp_path / f"big_e{erode}_{reproject}",
+            psd_loader=lambda _p, layer=layer: FakePSD(res, [layer]),
+            reproject=reproject,
+        )
+        assert m["canvas"] == {"width": n, "height": n}
+        assert [l["id"] for l in m["layers"]] == ["st_00_face"], f"erode={erode}"
+
+    # A hat See-through really dropped is still recovered at native resolution.
+    hat = (abs(xx - 400) < 150) & (yy > 10) & (yy < 60)
+    art_hat = art.copy()
+    art_hat[hat] = (30, 20, 60, 255)
+    src_hat = tmp_path / "big_hat.png"
+    Image.fromarray(art_hat).save(src_hat)
+    layer = _seethrough_layer_from(art, res, 1)
+    m_hat = lp.build_single_image_layout(
+        src_hat,
+        tmp_path / "big.psd",
+        tmp_path / f"big_hat_{reproject}",
+        psd_loader=lambda _p: FakePSD(res, [layer]),
+        reproject=reproject,
+    )
+    hat_layer = next(l for l in m_hat["layers"] if l["id"] == "hat_recovered")
+    assert hat_layer["rect"]["width"] >= 290
+    assert "shoes_recovered" not in [l["id"] for l in m_hat["layers"]]
+
+
 # ---------- Web viewer patching & MOC3 validation ----------
 
 

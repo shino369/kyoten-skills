@@ -12,7 +12,7 @@ See-through outputs a 1280×1280 square padded PSD whose diffusion-reconstructed
 - **Native-pixel re-projection (`reproject_visible_pixels`):**
   - Always map layers back into the source artwork's full native canvas resolution via `unpad_params` + `map_bbox` + `paste_onto_canvas` (done automatically by `recover-single`).
   - Process layers front-to-back, accumulating an `occluder_mask` of opaque pixels from layers in front.
-  - Wherever a layer is visible in the original artwork and not covered by `binary_dilation(occluder_mask, 3)`, blend crisp original artist RGB back in with a Gaussian feather (`sigma=1.5`).
+  - Wherever a layer is visible in the original artwork and not covered by `binary_dilation(occluder_mask, 3)`, blend crisp original artist RGB back in with a Gaussian feather (`sigma=1.5`). These tolerances (and `recover-single`'s coverage dilation and minimum part sizes) are in See-through grid pixels; on a source larger than the grid, scale lengths by `1/scale` and areas by `1/scale²` (`recover-single` does this), or a 1–2 px segmentation edge becomes fake recovered outline parts.
   - Behind occluders, keep See-through's built-in hidden-area completion pixels so head turns and hair sway never expose blank seams.
 - **General cleanup rules:**
   - **Prevent double-nose shadow drift:** Exclude a dilated nose mask (`iterations=12`) from `head_face` re-projection so See-through's clean skin stays behind `head_nose`, while re-projecting crisp native pixels onto `head_nose`.

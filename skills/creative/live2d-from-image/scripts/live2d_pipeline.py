@@ -21,6 +21,7 @@ import argparse
 import html
 import importlib
 import json
+import math
 import os
 import re
 import secrets
@@ -355,7 +356,13 @@ def build_single_image_layout(
     tag_map: Mapping[str, list[str]] = DEFAULT_SEETHROUGH_TAG_MAP,
     psd_loader: Callable[[Path], Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a native-resolution psd2live-layout manifest from PNG + See-through PSD."""
+    """Build a native-resolution psd2live-layout manifest from PNG + See-through PSD.
+
+    ``min_top_px`` / ``min_bottom_px`` and the internal edge tolerances are in
+    See-through grid pixels (``psd.width``); they are converted to native pixels so a
+    1-2 grid-px segmentation edge mismatch on a larger source is not mistaken for a
+    dropped part.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     out_parts = out_dir / "parts"
     out_parts.mkdir(parents=True, exist_ok=True)
@@ -368,6 +375,13 @@ def build_single_image_layout(
     ow, oh = orig.size
     orig_arr = np.array(orig)
     scale, pad_x, pad_y = unpad_params(ow, oh, res)
+    native_per_grid = 1.0 / scale
+
+    def to_native_len(grid_px: int) -> int:
+        return max(grid_px, math.ceil(grid_px * native_per_grid))
+
+    def to_native_area(grid_px: int) -> int:
+        return max(1, math.ceil(grid_px * native_per_grid * native_per_grid))
 
     raw_layers: list[tuple[int, str, tuple[int, int, int, int], np.ndarray]] = []
     cov = np.zeros((oh, ow), dtype=np.uint8)
@@ -388,7 +402,14 @@ def build_single_image_layout(
         occ = np.zeros((oh, ow), dtype=bool)
         reprojected: list[tuple[int, str, tuple[int, int, int, int], np.ndarray]] = []
         for idx, lname, box, arr in reversed(raw_layers):
-            out_arr = reproject_visible_pixels(arr, box, orig_arr, occ)
+            out_arr = reproject_visible_pixels(
+                arr,
+                box,
+                orig_arr,
+                occ,
+                dilate_iters=to_native_len(3),
+                feather_sigma=1.5 * max(1.0, native_per_grid),
+            )
             x0, y0, x1, y1 = box
             occ[y0:y1, x0:x1] |= out_arr[:, :, 3] > 120
             reprojected.append((idx, lname, box, out_arr))
@@ -412,7 +433,7 @@ def build_single_image_layout(
             item["tags"] = list(tag_map[lname])
         layers.append(item)
 
-    cov_bool = ndimage.binary_dilation(cov > 80, iterations=2)
+    cov_bool = ndimage.binary_dilation(cov > 80, iterations=to_native_len(2))
     orig_bool = orig_arr[:, :, 3] > 20
     missing = orig_bool & (~cov_bool)
 
@@ -428,7 +449,7 @@ def build_single_image_layout(
                 keep |= c
         if not keep.any():
             return None
-        keep = ndimage.binary_dilation(keep, iterations=3) & orig_bool
+        keep = ndimage.binary_dilation(keep, iterations=to_native_len(3)) & orig_bool
         ys, xs = np.where(keep)
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
@@ -444,8 +465,8 @@ def build_single_image_layout(
     bot_zone = np.zeros((oh, ow), dtype=bool)
     bot_zone[int(oh * (1.0 - bottom_zone_ratio)) :, :] = True
 
-    shoes_rec = extract_zone(bot_zone, "shoes_recovered.png", min_px=min_bottom_px)
-    hat_rec = extract_zone(top_zone, "hat_recovered.png", min_px=min_top_px)
+    shoes_rec = extract_zone(bot_zone, "shoes_recovered.png", min_px=to_native_area(min_bottom_px))
+    hat_rec = extract_zone(top_zone, "hat_recovered.png", min_px=to_native_area(min_top_px))
 
     if shoes_rec is not None:
         sp, ssz, srect = shoes_rec
