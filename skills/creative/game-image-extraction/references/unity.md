@@ -33,10 +33,10 @@ Before extracting, group `.bundle` files by prefix/subfolder and check sizes. In
 
 ## UnityPy Extraction (Recommended for Images)
 
-`UnityPy` uses `tpk-ar` (AssetRipper's TypeTree package) plus `texture2ddecoder`, `etcpak`, and `astc-encoder-py`, so it decodes DXT1/DXT5 Crunched (`28`/`29`), BC7 (`25`), BC4/BC5 (`26`), RGB24 (`3`), RGBA32 (`4`), ETC, and ASTC directly in Python via `uv`:
+`UnityPy` uses `tpk-ar` (AssetRipper's TypeTree package) plus `texture2ddecoder`, `etcpak`, and `astc-encoder-py`, so it decodes DXT1/DXT5 Crunched (`28`/`29`), BC7 (`25`), BC4/BC5 (`26`), RGB24 (`3`), RGBA32 (`4`), ETC, and ASTC directly in Python via `uv`. Run it with the `geu` helper from [SKILL.md](../SKILL.md), from a folder you trust:
 
-```powershell
-uv run --python 3.12 --with UnityPy --with pillow python -I path/to/game_extract.py unity-extract "<game_dir>/<name>_Data" -o "<out_dir>"
+```bash
+geu unity-extract "<game_dir>/<name>_Data" -o "<out_dir>"
 ```
 
 Output folder layout produced by `game_extract.py unity-extract`:
