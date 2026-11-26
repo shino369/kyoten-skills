@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Polish flats in a layered RGB PSD, preserving the source document."""
+"""Polish flats in a layered RGB PSD, preserving the source document.
+
+Originally written by staryume (https://github.com/staryume) as Coloring Helper,
+https://github.com/staryume/ColoringHelper at ed6315b, and included here under this
+repository's MIT license with the author's agreement. Added for agents: the `layers`
+command and the non-interactive role flags of `setup`.
+
+  uv run --python 3.12 --with 'psd-tools[composite]==1.27.0' --with numpy --with pillow \\
+    --with scipy python -I color_cleanup.py layers Artwork.psd
+"""
 
 import argparse
 from pathlib import Path
@@ -86,35 +95,71 @@ def config_path(source):
     return source.with_suffix(".cleanup.json")
 
 
-def setup(source):
-    psd = read_psd(source)
+ROLES = ("lineart", "flat", "background", "protect")
+
+
+def layer_rows(psd):
+    """Return (reference, suggested role) for each visible raster layer, bottom to top."""
     shape = (psd.height, psd.width)
-    rows = [(ref, suggested_role(layer, ref, shape)) for ref, layer in raster_layers(psd)
+    return [(ref, suggested_role(layer, ref, shape)) for ref, layer in raster_layers(psd)
             if layer.is_visible() and layer.width and layer.height]
+
+
+def print_layers(rows, as_json=False):
+    if as_json:
+        print(json.dumps([{"number": number, "suggested": role, **ref}
+                          for number, (ref, role) in enumerate(rows, 1)], ensure_ascii=False, indent=2))
+        return
     print("Visible raster layers, bottom to top")
     for number, (ref, role) in enumerate(rows, 1):
         print(f"{number:>3}  {role:<10}  {' / '.join(ref['names'])}")
+
+
+def parse_numbers(answer, defaults, role, count):
+    """Turn '3,5', '' (keep the suggestion) or '-' (none) into checked layer numbers."""
+    try:
+        ids = [] if answer == "-" else [int(i) for i in (answer.split(",") if answer else defaults)]
+    except ValueError:
+        ids = None
+    if ids is None or len(ids) != len(set(ids)) or any(i < 1 or i > count for i in ids) \
+            or (role in ("lineart", "flat") and not ids):
+        raise ValueError(f"{role}: enter comma-separated layer numbers from the table"
+                         f"{'' if role in ('background', 'protect') else ' (at least one)'}.")
+    return ids
+
+
+def setup(source, choices=None):
+    """Save the layer roles. `choices` maps a role to '3,5', '-' or None (the suggestion);
+    without it, ask on the terminal."""
+    psd = read_psd(source)
+    if config_path(source).exists():
+        raise FileExistsError(f"{config_path(source)} already exists. Move it aside to set up again.")
+    rows = layer_rows(psd)
+    if choices is None:
+        print_layers(rows)
     roles = {}
-    for role in ("lineart", "flat", "background", "protect"):
+    for role in ROLES:
         defaults = [str(i) for i, (_, guess) in enumerate(rows, 1) if guess == role]
         while True:
-            answer = input(f"{role} layer numbers [{','.join(defaults) or 'none'}] "
-                           "(Enter accepts, - clears): ").strip()
+            if choices is None:
+                answer = input(f"{role} layer numbers [{','.join(defaults) or 'none'}] "
+                               "(Enter accepts, - clears): ").strip()
+            else:
+                answer = (choices.get(role) or "").strip()
             try:
-                ids = [] if answer == "-" else [int(i) for i in (answer.split(",") if answer else defaults)]
-                if len(ids) != len(set(ids)) or any(i < 1 or i > len(rows) for i in ids):
-                    raise ValueError
-                if role in ("lineart", "flat") and not ids:
-                    raise ValueError
-                roles[role] = [rows[i-1][0] for i in ids]
+                roles[role] = [rows[i-1][0] for i in parse_numbers(answer, defaults, role, len(rows))]
                 break
-            except ValueError:
-                print("Enter comma-separated layer numbers from the table.")
+            except ValueError as error:
+                if choices is not None:
+                    raise
+                print(error)
     config = {"layers": roles, "protect_boxes": []}
     resolve_config(psd, config)
     with config_path(source).open("x", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    for role in ROLES:
+        print(f"{role:<10}  {', '.join(' / '.join(ref['names']) for ref in roles[role]) or '-'}")
     print(f"Saved {config_path(source)}")
 
 
@@ -122,7 +167,7 @@ def resolve_config(psd, config):
     available = {tuple(ref["index"]): (ref, layer) for ref, layer in raster_layers(psd)}
     used = set()
     resolved = {}
-    for role in ("lineart", "flat", "background", "protect"):
+    for role in ROLES:
         selections = []
         for ref in config["layers"].get(role, []):
             path = tuple(ref["index"])
@@ -498,10 +543,19 @@ def polish(source, output=None):
     print(f"PSD: {output}\nReview: {preview}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("setup", help="confirm layer roles and save artwork settings").add_argument("source", type=Path)
+    listing = commands.add_parser("layers", help="list visible raster layers with suggested roles")
+    listing.add_argument("source", type=Path)
+    listing.add_argument("--json", action="store_true", help="print the table as JSON")
+    prepare = commands.add_parser("setup", help="confirm layer roles and save artwork settings")
+    prepare.add_argument("source", type=Path)
+    for role in ROLES:
+        prepare.add_argument(f"--{role}", metavar="N,N",
+                             help="layer numbers from `layers`; - for none; omitted = the suggestion")
+    prepare.add_argument("--accept", action="store_true",
+                         help="no prompts: use the suggestion for every role not given")
     run = commands.add_parser("polish", help="write an editable PSD copy and review PNG")
     run.add_argument("source", type=Path)
     run.add_argument("--output", type=Path)
@@ -509,10 +563,14 @@ def main():
     check.add_argument("source", type=Path)
     check.add_argument("reference", type=Path)
     check.add_argument("--output", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
-        if args.command == "setup":
-            setup(args.source)
+        if args.command == "layers":
+            print_layers(layer_rows(read_psd(args.source)), args.json)
+        elif args.command == "setup":
+            choices = {role: getattr(args, role) for role in ROLES}
+            interactive = not args.accept and all(value is None for value in choices.values())
+            setup(args.source, None if interactive else choices)
         elif args.command == "compare":
             compare(args.source, args.reference, args.output)
         else:

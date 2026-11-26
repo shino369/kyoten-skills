@@ -9,7 +9,8 @@
     "test:coverage": "vitest run --coverage",
     "test:python:imgalpha": "uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow --with numpy --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/creative/transparent-background/scripts --cov=imgalpha --cov-branch --cov-fail-under=100",
     "test:python:game-extract": "uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow python -I -B -m pytest -q -p no:cacheprovider skills/creative/game-image-extraction/scripts --cov=game_extract --cov-branch --cov-fail-under=100",
-    "test:python": "pnpm test:python:imgalpha && pnpm test:python:game-extract",
+    "test:python:psd-flats-cleanup": "uv run --quiet --python 3.12 --with pytest --with pytest-cov --with \"psd-tools[composite]==1.27.0\" --with numpy --with pillow --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/creative/psd-flats-cleanup/scripts --cov=color_cleanup --cov-branch --cov-fail-under=100",
+    "test:python": "pnpm test:python:imgalpha && pnpm test:python:game-extract && pnpm test:python:psd-flats-cleanup",
     "format": "prettier --write \"**/*.{js,mjs,json,md,yaml,yml}\"",
     "format:check": "prettier --check \"**/*.{js,mjs,json,md,yaml,yml}\"",
     "check": "pnpm format:check && pnpm test:coverage && pnpm test:python"
