@@ -87,8 +87,8 @@ Real-time screen recording drops frames and produces jittery physics. For cinema
 3. **Real-time live cross-dissolve for discrete prop/arm switches:**
    - Because `ParamArmPose` switches discrete sprite layers (0→1→2→3→4), abrupt single-frame cuts look harsh.
    - During a 0.34s transition window, render the **same live animated frame** twice onto an offscreen canvas—once at `fromPose` and once at `toPose`—and composite `toPose` with `globalAlpha = smootherstep(u)` over `fromPose`. Hair, eyes, breathing, and physics continue moving seamlessly throughout the dissolve.
-4. **Stream raw RGBA frames directly into `ffmpeg` (`imageio-ffmpeg` via `uv`):**
-   - Resolve `ffmpeg` via `uv run --python 3.12 --with imageio-ffmpeg python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"`.
+4. **Stream raw RGBA frames directly into `ffmpeg` (`imageio-ffmpeg` via `uv`, from a trusted folder):**
+   - Resolve `ffmpeg` via `uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with imageio-ffmpeg==0.8.1 python -I -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"`.
    - Pipe `1080x1440` (or `1920x1080`) raw RGBA frames (`-f rawvideo -pix_fmt rgba -s WxH -r 60 -i -`) into `libx264 -crf 17 -preset slow -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -movflags +faststart`.
    - Save 6–9 keyframe PNGs at chapter timestamps during rendering and visually inspect them for framing, clipping, and expression accuracy.
 5. **Optional lossless BGM muxing:**

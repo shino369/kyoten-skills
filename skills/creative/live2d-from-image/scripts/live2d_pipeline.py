@@ -13,6 +13,14 @@ Subcommands (run with uv, nothing installed globally):
   patch-web       Upgrade export_web/index.html with independent ON/OFF
                   prop/pose toggles combinable with any facial expression.
   validate-moc3   Inspect *.moc3 header, *.model3.json references, and physics3.
+
+Run it through the `l2d` helper in SKILL.md from a folder you trust, never from inside a folder
+of received artwork: uv reads pyproject.toml, uv.toml, and .venv from the folder it runs in.
+
+  uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 \\
+    --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 \\
+    --with psd-tools==1.27.0 --with attrs==26.1.0 \\
+    python -I live2d_pipeline.py validate-moc3 "<out_dir>/export_moc3" --json
 """
 
 from __future__ import annotations
@@ -1491,6 +1499,7 @@ def run_p2l_pipeline(
                         if attempt >= attempts:
                             raise
                         _stop_process(proc)
+                        proc = None
                         attempt += 1
                 endpoint = f"http://127.0.0.1:{actual_port}/mcp"
                 with factory(p2l_resolved, endpoint, token) as p2l:

@@ -31,21 +31,25 @@ Two cross-platform CLI scripts handle the deterministic parts of the pipeline:
 
 ## Shell Helpers
 
-PowerShell:
+Run `scripts/live2d_pipeline.py` through `uv` (no global installs) with the pinned versions below. Define the `l2d` helper in each shell command that uses it. Set `L2D_PY` to the absolute path of `scripts/live2d_pipeline.py` inside the folder that holds this SKILL.md (Claude Code shows it as the skill's base directory; a project install is `<workspace>/.agents/skills/live2d-from-image/`). Never derive it from the current directory: a repository you are inside could hold its own copy.
+
+**Run `l2d` from the workspace root or another folder you trust, never from inside a folder of received artwork or extracted game files.** uv reads `pyproject.toml`, `uv.toml`, and `.venv` from the current folder and its parents, so an untrusted folder could change what gets installed and run. `--no-project --no-config` keeps the first two out; the folder rule covers the rest. Pass input and output files as absolute paths or paths relative to that folder.
+
+PowerShell (`cmd.exe` has no functions, so use PowerShell or Git Bash):
 
 ```powershell
-$L2D_DIR = Join-Path (git rev-parse --show-toplevel) '.agents/skills/live2d-from-image/scripts'
-$L2D_PY = Join-Path $L2D_DIR 'live2d_pipeline.py'
-function l2d { uv run --quiet --python 3.12 --with pillow --with numpy --with scipy --with psd-tools python -I $L2D_PY @args }
+$L2D_PY = 'C:\absolute\path\to\live2d-from-image\scripts\live2d_pipeline.py'
+function l2d { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 --with psd-tools==1.27.0 --with attrs==26.1.0 python -I $L2D_PY @args }
 ```
 
 bash / zsh / Git Bash:
 
 ```bash
-L2D_DIR="$(git rev-parse --show-toplevel)/.agents/skills/live2d-from-image/scripts"
-L2D_PY="$L2D_DIR/live2d_pipeline.py"
-l2d() { uv run --quiet --python 3.12 --with pillow --with numpy --with scipy --with psd-tools python -I "$L2D_PY" "$@"; }
+L2D_PY="/absolute/path/to/live2d-from-image/scripts/live2d_pipeline.py"
+l2d() { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 --with numpy==2.5.5 --with scipy==1.18.1 --with psd-tools==1.27.0 --with attrs==26.1.0 python -I "$L2D_PY" "$@"; }
 ```
+
+`--no-build` installs wheels only (all five packages have them for Python 3.12 on macOS, Linux, and Windows). `--exclude-newer P7D` makes uv ignore files uploaded in the last 7 days, so a file added later to a pinned release is not picked up; it needs uv 0.9.17 or later (`uv --version`). `--no-config` also skips your own uv settings, such as a private index. In PowerShell, quote comma-separated flags (`--rect '0,0,100,100'`, `--face-rect '200,40,700,600'`); bare commas are parsed as arrays and split into separate arguments.
 
 ## Choose the Right Mode
 
@@ -158,5 +162,5 @@ When developing inside the skill repository, run both suites at 100% branch cove
 
 ```bash
 pnpm test:coverage
-uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow --with numpy --with scipy python -I -B -m pytest -q -p no:cacheprovider skills/creative/live2d-from-image/scripts --cov=live2d_pipeline --cov-branch --cov-fail-under=100
+pnpm test:python:live2d
 ```
