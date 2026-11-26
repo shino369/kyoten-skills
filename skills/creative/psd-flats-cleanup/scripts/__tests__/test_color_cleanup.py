@@ -4,6 +4,7 @@ The first cases are the original Coloring Helper tests by staryume, ported to py
 same assertions. The rest cover every remaining branch.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -204,8 +205,11 @@ def test_layers_lists_table_and_json(tmp_path, capsys):
     table = capsys.readouterr().out
     assert "1  background  Paper" in table
     assert "3  lineart     Drawing / Contours / Pass" in table
+    assert "Canvas 130×100 (0.0 MP)" in table
     cc.main(["layers", str(source), "--json"])
-    rows = json.loads(capsys.readouterr().out)
+    listing = json.loads(capsys.readouterr().out)
+    assert listing["canvas"] == {"width": 130, "height": 100, "megapixels": 0.013, "memory_gb": 0.0}
+    rows = listing["layers"]
     assert [(r["number"], r["suggested"], r["names"]) for r in rows] == [
         (1, "background", ["Paper"]),
         (2, "flat", ["Drawing", "Paint", "Pass"]),
@@ -513,13 +517,62 @@ def test_polish_removes_the_psd_when_the_review_cannot_be_published(tmp_path, mo
 
     def link(src, dst):
         if str(dst).endswith(".png"):
-            raise OSError("disk full")
+            raise OSError(errno.ENOSPC, "disk full")
         real_link(src, dst)
 
     monkeypatch.setattr(cc.os, "link", link)
+    monkeypatch.setattr(cc.shutil, "copyfileobj", lambda a, b: (_ for _ in ()).throw(OSError(errno.ENOSPC, "disk full")))
     with pytest.raises(OSError, match="disk full"):
         cc.polish(source)
     assert not source.with_name("art-polished.psd").exists()
+    assert not source.with_name("art-polished-review.png").exists()
+    assert not list(tmp_path.glob(".color-cleanup-*"))
+
+
+def test_polish_rolls_back_on_interrupt(tmp_path, monkeypatch):
+    source = artwork(tmp_path / "art.psd")
+    configure(source)
+    real_link = os.link
+
+    def link(src, dst):
+        if str(dst).endswith(".png"):
+            raise KeyboardInterrupt
+        real_link(src, dst)
+
+    monkeypatch.setattr(cc.os, "link", link)
+    with pytest.raises(KeyboardInterrupt):
+        cc.polish(source)
+    assert not source.with_name("art-polished.psd").exists()
+    assert not list(tmp_path.glob(".color-cleanup-*"))
+
+
+def test_polish_copies_where_the_volume_has_no_hard_links(tmp_path, monkeypatch, capsys):
+    source = artwork(tmp_path / "art.psd")
+    configure(source)
+
+    def link(src, dst):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(cc.os, "link", link)
+    cc.polish(source)
+    assert read_psd(source.with_name("art-polished.psd")).size == (130, 100)
+    assert Image.open(source.with_name("art-polished-review.png")).size[0] == 3 * 130
+    out = capsys.readouterr().out
+    assert "flat        Drawing / Paint / Pass" in out  # The settings it applied.
+    assert "max_region_px 8" in out
+
+
+def test_publish_refuses_an_existing_file_even_without_hard_links(tmp_path, monkeypatch):
+    staged = tmp_path / "staged.bin"
+    staged.write_bytes(b"new")
+    target = tmp_path / "target.bin"
+    target.symlink_to(tmp_path / "missing")
+    with pytest.raises(FileExistsError):
+        cc.publish(staged, target)
+    monkeypatch.setattr(cc.os, "link", lambda a, b: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross-device")))
+    with pytest.raises(FileExistsError):
+        cc.publish(staged, target)
+    assert not (tmp_path / "missing").exists()
 
 
 def test_compare_scores_differences_and_skips_dropped_flats(tmp_path, capsys):
@@ -530,7 +583,7 @@ def test_compare_scores_differences_and_skips_dropped_flats(tmp_path, capsys):
     capsys.readouterr()
     cc.compare(source, finished)  # A finished copy with nothing corrected by hand.
     out = capsys.readouterr().out
-    assert "tool: Pass   artist: nothing" in out or "tool: nothing   artist: Pass" in out
+    assert "tool: nothing   artist: Drawing / Paint / Pass" in out
     with pytest.raises(FileExistsError):
         cc.compare(source, finished)
     psd = read_psd(finished)
@@ -554,3 +607,175 @@ def test_runs_as_a_script(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["color_cleanup.py", "layers", str(source)])
     runpy.run_path(str(SCRIPTS / "color_cleanup.py"), run_name="__main__")
     assert "Visible raster layers" in capsys.readouterr().out
+
+
+# ---------- review round 1 and security review ----------
+
+
+def two_hair_flats(path):
+    """Girl/Hair and Boy/Hair: two flats with the same layer name in different groups."""
+    owner, ink = geometry()
+    psd = PSDImage.new("RGB", owner.shape[::-1])
+    psd.create_pixel_layer(Image.new("RGB", psd.size, "white"), name="Paper")
+    left = np.zeros(owner.shape, bool)
+    left[:, :62] = True
+    for name, part, color in (("Girl", left, PINK), ("Boy", ~left, (60, 90, 170))):
+        group = psd.create_group(name=name)
+        PixelLayer.fromarray(rgba((owner == 1) & part, color), group, name="Hair")
+    lines = np.zeros((*ink.shape, 4), np.uint8)
+    lines[..., 3] = ink
+    PixelLayer.fromarray(lines, psd, name="Ink")
+    psd.save(path)
+    return path
+
+
+def test_compare_matches_flats_by_their_group_path(tmp_path, capsys):
+    source = two_hair_flats(tmp_path / "pair.psd")
+    configure(source, lineart="4", flat="2,3", background="1")
+    cc.polish(source)
+    capsys.readouterr()
+    cc.compare(source, source.with_name("pair-polished.psd"))
+    out = capsys.readouterr().out
+    assert "matches 100.0%" in out and "0 pixels still differ" in out
+
+
+def test_compare_refuses_an_ambiguous_layer_path(tmp_path):
+    source = two_hair_flats(tmp_path / "pair.psd")
+    configure(source, lineart="4", flat="2,3", background="1")
+    finished = read_psd(source)
+    finished[1].name = "Boy"  # Now both groups are "Boy": Boy / Hair twice.
+    finished.save(tmp_path / "done.psd")
+    with pytest.raises(ValueError, match="share the path Boy / Hair"):
+        cc.compare(source, tmp_path / "done.psd")
+
+
+def test_compare_writes_only_a_new_png(tmp_path, monkeypatch):
+    source = artwork(tmp_path / "art.psd")
+    configure(source)
+    with pytest.raises(ValueError, match="end in .png"):
+        cc.compare(source, source, tmp_path / "diff.psd")
+    with pytest.raises(ValueError, match="8-bit RGB"):
+        deep = tmp_path / "deep.psd"
+        PSDImage.new("RGB", (130, 100), depth=16).save(deep)
+        cc.compare(source, deep)
+
+    def broken(self, fp, *args, **kwargs):
+        fp.write(b"partial")
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(cc.Image.Image, "save", broken)
+    with pytest.raises(OSError, match="disk full"):
+        cc.compare(source, source, tmp_path / "diff.png")
+    assert not (tmp_path / "diff.png").exists()
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("Pink ribbon", "flat"), ("Blink", "flat"), ("Ink", "lineart"), ("inking 2", "lineart"), ("Inks", "lineart"),
+])
+def test_ink_is_a_whole_word(name, expected):
+    light = solid_block((230, 170, 190), 32, 64)
+    assert cc.suggested_role(fake(name, light, size=(64, 64)), ref(name), (64, 64)) == expected
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda c: c.update(protect_boxes=[[10.5, 0, 40, 40]]), "whole pixels"),
+    (lambda c: c.update(protect_boxes="all"), "whole pixels"),
+    (lambda c: c["layers"]["flat"][0].update(index=1), "as setup wrote it"),
+    (lambda c: c["layers"]["flat"][0].update(extra=0), "as setup wrote it"),
+    (lambda c: c["layers"].update(lineart="Ink"), "list of layers"),
+    (lambda c: c["layers"].update(paint=[]), "Unknown role"),
+    (lambda c: c.update(layers=[]), "\"layers\" object"),
+    (lambda c: c.update(colour="red"), "Unknown setting"),
+    (lambda c: c.update(ignore={"index": [0]}), "ignore"),
+])
+def test_settings_with_wrong_types_stop_with_a_message(tmp_path, capsys, change, message):
+    source = artwork(tmp_path / "art.psd")
+    config = configure(source)
+    change(config)
+    cc.config_path(source).write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cc.main(["polish", str(source)])
+    assert message in capsys.readouterr().err
+
+
+def test_ignore_is_matched_by_position_not_by_the_whole_entry(tmp_path):
+    source = artwork(tmp_path / "art.psd")
+    config = configure(source)
+    config["ignore"] = [{**config["layers"]["lineart"][0]}]
+    config["ignore"][0]["names"] = ["Drawing", "Contours", "Other"]
+    cc.config_path(source).write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="Ignored layer moved"):
+        cc.load(source)
+    config["ignore"][0]["names"] = ["Drawing", "Contours", "Pass"]
+    cc.config_path(source).write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot also have a role"):
+        cc.load(source)
+
+
+def test_setup_flags_write_every_setting(tmp_path, capsys):
+    source = artwork(tmp_path / "art.psd")
+    psd = read_psd(source)
+    PixelLayer.fromarray(rgba(np.ones((100, 130), bool), (0, 0, 255)), psd, name="Notes")
+    psd.save(source)
+    cc.main(["setup", str(source), "--lineart", "3", "--flat", "2", "--background", "1", "--protect", "-",
+             "--ignore", "4", "--max-region-px", "12", "--protect-box", "0,0,10,10", "--protect-box", "20,20,30,40"])
+    config = json.loads(cc.config_path(source).read_text(encoding="utf-8"))
+    assert config["ignore"] == [{"index": [2], "names": ["Notes"]}]
+    assert config["max_region_px"] == 12
+    assert config["protect_boxes"] == [[0, 0, 10, 10], [20, 20, 30, 40]]
+    assert "ignore      Notes" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--ignore", "3"], "cannot also have a role"),
+    (["--ignore", "9"], "ignore:"),
+    (["--max-region-px", "200"], "max_region_px"),
+    (["--protect-box", "0,0,500,10"], "protect_boxes"),
+    (["--protect-box", "0,0,10"], "protect_boxes"),
+    (["--protect-box", "a,b,c,d"], "protect_boxes"),
+])
+def test_setup_rejects_bad_settings_flags(tmp_path, capsys, flags, message):
+    source = artwork(tmp_path / "art.psd")
+    with pytest.raises(SystemExit):
+        cc.main(["setup", str(source), "--accept", *flags])
+    assert message in capsys.readouterr().err
+    assert not cc.config_path(source).exists()
+
+
+def test_large_canvases_need_an_explicit_memory_allowance(tmp_path, capsys):
+    source = artwork(tmp_path / "art.psd")
+    configure(source)
+    with pytest.raises(SystemExit):
+        cc.main(["polish", str(source), "--max-megapixels", "0.01"])
+    assert "--max-megapixels 1" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cc.main(["compare", str(source), str(source), "--max-megapixels", "0.01"])
+    cc.main(["polish", str(source), "--max-megapixels", "0.02"])
+    assert source.with_name("art-polished.psd").exists()
+
+
+def test_names_are_escaped_when_printed(capsys):
+    rows = [(ref("線画\u3000a\nb\x1b[2K\u202e"), "lineart")]
+    cc.print_layers(rows, (8, 8))
+    out = capsys.readouterr().out
+    assert "線画\u3000a\\nb\\x1b[2K\\u202e" in out
+    assert "\x1b" not in out and "\u202e" not in out
+    cc.print_layers(rows, (8, 8), as_json=True)
+    listing = capsys.readouterr().out
+    assert "\x1b" not in listing and "\u202e" not in listing
+    assert json.loads(listing)["layers"][0]["names"] == ["線画\u3000a\nb\x1b[2K\u202e"]
+
+
+def test_settings_prints_what_polish_would_apply(tmp_path, capsys):
+    source = artwork(tmp_path / "art.psd")
+    configure(source)
+    capsys.readouterr()
+    cc.main(["settings", str(source)])
+    out = capsys.readouterr().out
+    assert "Settings from art.cleanup.json" in out and "lineart     Drawing / Contours / Pass" in out
+    config = json.loads(cc.config_path(source).read_text(encoding="utf-8"))
+    config["ignore"] = config["layers"]["flat"]
+    cc.config_path(source).write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cc.main(["settings", str(source)])
+    assert "cannot also have a role" in capsys.readouterr().err

@@ -3,20 +3,25 @@
 
 Originally written by staryume (https://github.com/staryume) as Coloring Helper,
 https://github.com/staryume/ColoringHelper at ed6315b, and included here under this
-repository's MIT license with the author's agreement. Added for agents: the `layers`
-command and the non-interactive role flags of `setup`.
+repository's MIT license with the author's agreement. Added for agents: the `layers` and
+`settings` commands, setup flags instead of prompts and hand edits, a canvas size limit,
+copying where a volume has no hard links, and matching flats by group path in `compare`.
 
-  uv run --python 3.12 --with 'psd-tools[composite]==1.27.0' --with numpy --with pillow \\
-    --with scipy python -I color_cleanup.py layers Artwork.psd
+  uv run --no-project --no-config --no-build --python 3.12 --with 'psd-tools[composite]==1.27.0' \\
+    --with numpy==2.5.5 --with pillow==13.0.0 --with scipy==1.18.1 --with attrs==26.1.0 \\
+    --with aggdraw==1.4.1 python -I color_cleanup.py layers Artwork.psd
 """
 
 import argparse
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
+import math
 import os
 import re
+import shutil
 import sys
+import unicodedata
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -28,11 +33,59 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 
+# Peak memory measured on a 4160x3200 canvas with one flat: 4.2 GB, about 320 bytes per pixel.
+BYTES_PER_PIXEL = 320
+MAX_MEGAPIXELS = 40
+SETTINGS = ("layers", "protect_boxes", "max_region_px", "ignore")
+
+
 def read_psd(path):
     psd = PSDImage.open(path)
     if psd.color_mode != ColorMode.RGB or psd.depth != 8:
         raise ValueError("Use an 8-bit RGB PSD with separate raster flats and lineart.")
     return psd
+
+
+def shown(text):
+    """Escape characters a terminal would act on (newlines, escapes, bidi controls) in a name
+    from the file. Spaces of any width, as in Japanese names, stay as they are."""
+    return "".join(c if c.isprintable() or unicodedata.category(c) == "Zs"
+                   else c.encode("unicode_escape").decode("ascii") for c in text)
+
+
+def path_text(names):
+    return shown(" / ".join(names))
+
+
+def layer_path(layer):
+    """The group and layer names from the document root down to `layer`."""
+    names = []
+    while layer.parent is not None:
+        names.append(layer.name)
+        layer = layer.parent
+    return tuple(reversed(names))
+
+
+def publish(staged, path):
+    """Put a finished file at `path` without replacing anything there.
+
+    A hard link is atomic. Volumes without hard links (exFAT, FAT32, some network shares) get
+    an exclusive copy instead; both refuse an existing file or symlink.
+    """
+    try:
+        os.link(staged, path)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass
+    with open(staged, "rb") as source, open(path, "xb") as target:
+        try:
+            shutil.copyfileobj(source, target)
+        except BaseException:
+            target.close()
+            path.unlink()
+            raise
 
 
 def raster_layers(group, indices=(), names=()):
@@ -68,7 +121,8 @@ def suggested_role(layer, ref, shape):
     title = "/".join(ref["names"]).lower()
     if re.search(r"eye.?white|protect|highlight|sclera|iris", title):
         return "protect"
-    if re.search(r"line\s*art|(?:^|/)line\d*(?:/|$)|ink|(?:^|[ /_])lines?(?:$|[ /_])", title):
+    if re.search(r"line\s*art|(?:^|/)line\d*(?:/|$)|(?:^|[ /_-])ink(?:s|ing|ed)?(?:$|[ /_\d-])"
+                 r"|(?:^|[ /_])lines?(?:$|[ /_])", title):
         return "lineart"
     if re.search(r"background|(?:^|[ /_])(?:bg|paper)(?:$|[ /_])", title):
         return "background"
@@ -105,14 +159,88 @@ def layer_rows(psd):
             if layer.is_visible() and layer.width and layer.height]
 
 
-def print_layers(rows, as_json=False):
+def canvas_size(size):
+    width, height = size
+    return {"width": width, "height": height, "megapixels": round(width * height / 1e6, 3),
+            "memory_gb": round(width * height * BYTES_PER_PIXEL / 1e9, 1)}
+
+
+def print_layers(rows, size, as_json=False):
+    canvas = canvas_size(size)
     if as_json:
-        print(json.dumps([{"number": number, "suggested": role, **ref}
-                          for number, (ref, role) in enumerate(rows, 1)], ensure_ascii=False, indent=2))
+        print(json.dumps({"canvas": canvas, "layers": [{"number": number, "suggested": role, **ref}
+                          for number, (ref, role) in enumerate(rows, 1)]}, indent=2))
         return
+    print(f"Canvas {canvas['width']}×{canvas['height']} ({canvas['megapixels']:.1f} MP); polish needs about "
+          f"{canvas['memory_gb']:.1f} GB of memory with one flat, more with many.")
     print("Visible raster layers, bottom to top")
     for number, (ref, role) in enumerate(rows, 1):
-        print(f"{number:>3}  {role:<10}  {' / '.join(ref['names'])}")
+        print(f"{number:>3}  {role:<10}  {path_text(ref['names'])}")
+
+
+def print_settings(config, region):
+    for role in (*ROLES, "ignore"):
+        refs = config.get("ignore", []) if role == "ignore" else config["layers"].get(role, [])
+        print(f"{role:<10}  {', '.join(path_text(ref['names']) for ref in refs) or '-'}")
+    print(f"protect_boxes {' '.join(map(str, config.get('protect_boxes', []))) or '-'}")
+    print(f"max_region_px {region}")
+
+
+def check_ref(ref, where):
+    if not (isinstance(ref, dict) and set(ref) == {"index", "names"}
+            and isinstance(ref["index"], list) and isinstance(ref["names"], list)
+            and ref["index"] and len(ref["index"]) == len(ref["names"])
+            and all(type(i) is int for i in ref["index"]) and all(isinstance(n, str) for n in ref["names"])):
+        raise ValueError(f"{where}: each layer must be {{\"index\": [numbers], \"names\": [text]}} as setup wrote it.")
+    return tuple(ref["index"])
+
+
+def check_box(box, shape=None):
+    if not (isinstance(box, list) and len(box) == 4 and all(type(v) is int for v in box)):
+        raise ValueError("Each protect_boxes entry must be [left, top, right, bottom] in whole pixels.")
+    x0, y0, x1, y1 = box
+    if shape is not None and not (0 <= x0 < x1 <= shape[1] and 0 <= y0 < y1 <= shape[0]):
+        raise ValueError("Each protect_boxes entry must be [left, top, right, bottom] within the canvas.")
+    return box
+
+
+def check_settings(config):
+    """Refuse a settings file that setup could not have written, before any of it is used."""
+    if not isinstance(config, dict) or not isinstance(config.get("layers"), dict):
+        raise ValueError("The settings file must hold a \"layers\" object. Move it aside and run setup again.")
+    for key in config:
+        if key not in SETTINGS:
+            raise ValueError(f"Unknown setting {shown(str(key))!r}. Move the file aside and run setup again.")
+    for role, refs in config["layers"].items():
+        if role not in ROLES:
+            raise ValueError(f"Unknown role {shown(str(role))!r} in the settings file.")
+        if not isinstance(refs, list):
+            raise ValueError(f"{role}: expected a list of layers.")
+        for ref in refs:
+            check_ref(ref, role)
+    boxes = config.get("protect_boxes", [])
+    for box in boxes if isinstance(boxes, list) else [None]:
+        check_box(box)
+    ignore = config.get("ignore", [])
+    if not isinstance(ignore, list):
+        raise ValueError("ignore: expected a list of layers.")
+    for ref in ignore:
+        check_ref(ref, "ignore")
+
+
+def region_px(config, shape):
+    island = config.get("max_region_px", max(8, min(64, round(min(shape)/100))))
+    if type(island) is not int or not 8 <= island <= 128:
+        raise ValueError("max_region_px must be an integer from 8 to 128.")
+    return island
+
+
+def parse_box(text):
+    try:
+        box = [int(v) for v in text.split(",")]
+    except ValueError:
+        box = None
+    return check_box(box)
 
 
 def parse_numbers(answer, defaults, role, count):
@@ -128,15 +256,16 @@ def parse_numbers(answer, defaults, role, count):
     return ids
 
 
-def setup(source, choices=None):
-    """Save the layer roles. `choices` maps a role to '3,5', '-' or None (the suggestion);
-    without it, ask on the terminal."""
+def setup(source, choices=None, ignore=None, max_region_px=None, boxes=()):
+    """Save the layer roles and settings. `choices` maps a role to '3,5', '-' or None (the
+    suggestion); without it, ask on the terminal. `ignore` takes layer numbers like a role."""
     psd = read_psd(source)
     if config_path(source).exists():
         raise FileExistsError(f"{config_path(source)} already exists. Move it aside to set up again.")
     rows = layer_rows(psd)
+    shape = (psd.height, psd.width)
     if choices is None:
-        print_layers(rows)
+        print_layers(rows, psd.size)
     roles = {}
     for role in ROLES:
         defaults = [str(i) for i, (_, guess) in enumerate(rows, 1) if guess == role]
@@ -153,17 +282,30 @@ def setup(source, choices=None):
                 if choices is not None:
                     raise
                 print(error)
-    config = {"layers": roles, "protect_boxes": []}
+    config = {"layers": roles, "protect_boxes": [check_box(box, shape) for box in boxes]}
+    if ignore:
+        config["ignore"] = [rows[i-1][0] for i in parse_numbers(ignore, [], "ignore", len(rows))]
+        check_ignore(config)
+    if max_region_px is not None:
+        config["max_region_px"] = max_region_px
+    region = region_px(config, shape)
     resolve_config(psd, config)
     with config_path(source).open("x", encoding="utf-8") as handle:
         json.dump(config, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    for role in ROLES:
-        print(f"{role:<10}  {', '.join(' / '.join(ref['names']) for ref in roles[role]) or '-'}")
+    print_settings(config, region)
     print(f"Saved {config_path(source)}")
 
 
+def check_ignore(config):
+    roles = {tuple(ref["index"]) for refs in config["layers"].values() for ref in refs}
+    for ref in config.get("ignore", []):
+        if tuple(ref["index"]) in roles:
+            raise ValueError(f"An ignored layer cannot also have a role: {path_text(ref['names'])}.")
+
+
 def resolve_config(psd, config):
+    check_settings(config)
     available = {tuple(ref["index"]): (ref, layer) for ref, layer in raster_layers(psd)}
     used = set()
     resolved = {}
@@ -173,7 +315,7 @@ def resolve_config(psd, config):
             path = tuple(ref["index"])
             found = available.get(path)
             if found is None or found[0]["names"] != ref["names"] or not found[1].is_visible():
-                name = " / ".join(ref["names"])
+                name = path_text(ref["names"])
                 raise ValueError(f"Layer moved, changed name, or became hidden: {name}. "
                                  "Move the old settings aside and rerun setup.")
             if path in used:
@@ -215,9 +357,8 @@ def read_paint(shape, flats, protected, boxes):
     for layer in protected:
         canvas, local = window(layer, shape)
         shield[canvas] |= pixels(layer)[local][..., 3] >= 8
-    for x0, y0, x1, y1 in boxes:
-        if not (0 <= x0 < x1 <= shape[1] and 0 <= y0 < y1 <= shape[0]):
-            raise ValueError("Each protect_boxes entry must be [left, top, right, bottom] within the canvas.")
+    for box in boxes:
+        x0, y0, x1, y1 = check_box(box, shape)
         # A box keeps bare canvas bare; paint inside it can still be corrected.
         shield[y0:y1, x0:x1] |= top[y0:y1, x0:x1] == 0
     return top, solid, ndi.maximum_filter(shield, size=3)
@@ -436,43 +577,68 @@ def preview_sheet(before, after, corrections, uncertain, path):
     sheet.save(path)
 
 
-def load(source):
+def load(source, max_megapixels=MAX_MEGAPIXELS):
     """Open the artwork and work out its corrections from the saved settings."""
     psd = read_psd(source)
+    canvas = canvas_size(psd.size)
+    if canvas["megapixels"] > max_megapixels:
+        raise ValueError(f"The canvas is {canvas['width']}×{canvas['height']} ({canvas['megapixels']:.1f} MP) and needs "
+                         f"about {canvas['memory_gb']:.0f} GB of memory or more. If this machine has it, run again with "
+                         f"--max-megapixels {math.ceil(canvas['megapixels'])}.")
     config = json.loads(config_path(source).read_text(encoding="utf-8"))
     layers = resolve_config(psd, config)
     available = {tuple(ref["index"]): (ref, layer) for ref, layer in raster_layers(psd)}
     for ref in config.get("ignore", []):
         found = available.get(tuple(ref["index"]))
         if found is None or found[0]["names"] != ref["names"]:
-            raise ValueError(f"Ignored layer moved or changed name: {' / '.join(ref['names'])}.")
-        if any(ref in refs for refs in config["layers"].values()):
-            raise ValueError(f"An ignored layer cannot also have a role: {' / '.join(ref['names'])}.")
-        found[1].visible = False
+            raise ValueError(f"Ignored layer moved or changed name: {path_text(ref['names'])}.")
+    check_ignore(config)
+    for ref in config.get("ignore", []):
+        available[tuple(ref["index"])][1].visible = False
     shape = (psd.height, psd.width)
+    island = region_px(config, shape)
+    print(f"Settings from {config_path(source).name}")
+    print_settings(config, island)
     top, solid, shield = read_paint(shape, layers["flat"], layers["protect"], config.get("protect_boxes", []))
     ink = read_ink(shape, layers["lineart"])
-    island = config.get("max_region_px", max(8, min(64, round(min(shape)/100))))
-    if type(island) is not int or not 8 <= island <= 128:
-        raise ValueError("max_region_px must be an integer from 8 to 128.")
     print("Matching paint to the lines…", flush=True)
     corrections, pockets = correction_map(top, solid, shield, ink, len(layers["flat"]) + 1, island)
     return psd, layers, top, ink, corrections, pockets
 
 
-def compare(source, reference, output=None):
+def show_settings(source):
+    """Print the settings polish would apply, checked, with names escaped."""
+    psd = read_psd(source)
+    config = json.loads(config_path(source).read_text(encoding="utf-8"))
+    resolve_config(psd, config)
+    check_ignore(config)
+    print(f"Settings from {config_path(source).name}")
+    print_settings(config, region_px(config, (psd.height, psd.width)))
+
+
+def compare(source, reference, output=None, max_megapixels=MAX_MEGAPIXELS):
     """Score the tool against a copy of the artwork that the artist finished by hand."""
     output = output or source.with_name(f"{source.stem}-compare.png")
+    if output.suffix.lower() != ".png":
+        raise ValueError("The output filename must end in .png.")
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"{output} already exists. Choose another --output name.")
     print("Reading flats and lineart…", flush=True)
-    psd, layers, top, ink, corrections, _ = load(source)
-    finished = PSDImage.open(reference)
+    psd, layers, top, ink, corrections, _ = load(source, max_megapixels)
+    finished = read_psd(reference)
     if finished.size != psd.size:
         raise ValueError("The finished PSD must have the same canvas size as the source.")
-    by_name = {}
-    for _, layer in raster_layers(finished):
-        by_name.setdefault(layer.name, layer)
+    # Match by the whole group path: two flats called "Hair" in different groups are different.
+    by_path = {}
+    for ref, layer in raster_layers(finished):
+        by_path.setdefault(tuple(ref["names"]), []).append(layer)
+
+    def find(path):
+        found = by_path.get(path, [])
+        if len(found) > 1:
+            raise ValueError(f"Two layers in the finished PSD share the path {path_text(path)}. "
+                             "Rename one in both files.")
+        return found[0] if found else None
     truth = np.zeros(top.shape, np.int16)
     dropped = []
     colors = np.full((len(layers["flat"]) + 1, 3), 255, np.uint8)
@@ -480,7 +646,9 @@ def compare(source, reference, output=None):
         canvas, local = window(flat, top.shape)
         data = pixels(flat)[local]
         colors[index] = np.median(data[data[..., 3] >= 240, :3], axis=0)
-        layer = by_name.get(f"{flat.name} (polished)") or by_name.get(flat.name)
+        path = layer_path(flat)
+        layer = find((*path[:-1], f"{path[-1]} (polished)"))
+        layer = find(path) if layer is None else layer
         if layer is None or not layer.is_visible() or not layer.width:
             dropped.append(index)  # Hidden or removed in the finished file: not scored.
             continue
@@ -495,7 +663,7 @@ def compare(source, reference, output=None):
           f"The tool matches {100 * np.count_nonzero(asked & ~wrong) / max(1, np.count_nonzero(asked)):.1f}% of them.")
     print(f"The tool changed {np.count_nonzero(kept & wrong):,} pixels that the artist left alone. "
           f"{np.count_nonzero(wrong):,} pixels still differ.")
-    names = ["nothing"] + [flat.name for flat in layers["flat"]]
+    names = ["nothing"] + [path_text(layer_path(flat)) for flat in layers["flat"]]
     pairs, counts = np.unique(tool[wrong].astype(np.int64) * len(names) + truth[wrong], return_counts=True)
     for pair, count in sorted(zip(pairs, counts), key=lambda item: -item[1])[:8]:
         print(f"  {count:>7,}  tool: {names[pair // len(names)]}   artist: {names[pair % len(names)]}")
@@ -506,11 +674,17 @@ def compare(source, reference, output=None):
         image[ink >= 55] *= 0.35
         image[ndi.maximum_filter(wrong, size=3)] = (255, 0, 0)
         sheet.paste(Image.fromarray(image.astype(np.uint8)), (panel * top.shape[1], 0))
-    sheet.save(output)
+    with open(output, "xb") as handle:  # Exclusive: never follows or replaces a file put there meanwhile.
+        try:
+            sheet.save(handle, format="PNG")
+        except BaseException:
+            handle.close()
+            output.unlink()
+            raise
     print(f"Differences: {output}")
 
 
-def polish(source, output=None):
+def polish(source, output=None, max_megapixels=MAX_MEGAPIXELS):
     output = output or source.with_name(f"{source.stem}-polished.psd")
     if output.suffix.lower() != ".psd":
         raise ValueError("The output filename must end in .psd.")
@@ -519,11 +693,12 @@ def polish(source, output=None):
         if path.exists() or path.is_symlink():
             raise FileExistsError(f"{path} already exists. Choose another --output name.")
     print("Reading flats and lineart…", flush=True)
-    psd, layers, _, _, corrections, uncertain = load(source)
-    before = psd.composite(alpha=1, ignore_preview=True).convert("RGB")
+    psd, layers, _, _, corrections, uncertain = load(source, max_megapixels)
+    # The review panels skip the file's ICC profile: they compare pixels, not print colour.
+    before = psd.composite(alpha=1, ignore_preview=True, apply_icc=False).convert("RGB")
     changed = apply_corrections(psd, layers["flat"], corrections)
     print("Rendering and verifying the PSD copy…", flush=True)
-    after = psd.composite(alpha=1, ignore_preview=True).convert("RGB")
+    after = psd.composite(alpha=1, ignore_preview=True, apply_icc=False).convert("RGB")
     profile = psd.image_resources.get_data(Resource.ICC_PROFILE)
     with TemporaryDirectory(prefix=".color-cleanup-", dir=output.parent) as stage:
         staged_psd, staged_preview = Path(stage)/output.name, Path(stage)/preview.name
@@ -532,10 +707,10 @@ def polish(source, output=None):
         if reopened.size != psd.size or reopened.image_resources.get_data(Resource.ICC_PROFILE) != profile:
             raise ValueError("Saved PSD failed its canvas or color profile check.")
         preview_sheet(before, after, corrections, uncertain, staged_preview)
-        os.link(staged_psd, output)
+        publish(staged_psd, output)
         try:
-            os.link(staged_preview, preview)
-        except OSError:
+            publish(staged_preview, preview)
+        except BaseException:  # Both files or neither, even on Ctrl-C.
             output.unlink()
             raise
     print(f"Corrected {np.count_nonzero(corrections >= 0):,} pixels across {changed} layers. "
@@ -556,6 +731,12 @@ def main(argv=None):
                              help="layer numbers from `layers`; - for none; omitted = the suggestion")
     prepare.add_argument("--accept", action="store_true",
                          help="no prompts: use the suggestion for every role not given")
+    prepare.add_argument("--ignore", metavar="N,N", help="layer numbers to hide in the output copy")
+    prepare.add_argument("--max-region-px", type=int, metavar="N", help="8 to 128; default 1%% of the canvas")
+    prepare.add_argument("--protect-box", action="append", default=[], metavar="L,T,R,B",
+                         help="keep bare canvas bare inside this rectangle; repeat for more")
+    review = commands.add_parser("settings", help="print the saved settings that polish would apply")
+    review.add_argument("source", type=Path)
     run = commands.add_parser("polish", help="write an editable PSD copy and review PNG")
     run.add_argument("source", type=Path)
     run.add_argument("--output", type=Path)
@@ -563,18 +744,26 @@ def main(argv=None):
     check.add_argument("source", type=Path)
     check.add_argument("reference", type=Path)
     check.add_argument("--output", type=Path)
+    for command in (run, check):
+        command.add_argument("--max-megapixels", type=float, default=MAX_MEGAPIXELS, metavar="N",
+                             help=f"refuse larger canvases (default {MAX_MEGAPIXELS}; about "
+                                  f"{BYTES_PER_PIXEL * 1e6 / 1e9:.2f} GB of memory per megapixel)")
     args = parser.parse_args(argv)
     try:
         if args.command == "layers":
-            print_layers(layer_rows(read_psd(args.source)), args.json)
+            psd = read_psd(args.source)
+            print_layers(layer_rows(psd), psd.size, args.json)
         elif args.command == "setup":
             choices = {role: getattr(args, role) for role in ROLES}
             interactive = not args.accept and all(value is None for value in choices.values())
-            setup(args.source, None if interactive else choices)
+            setup(args.source, None if interactive else choices, args.ignore, args.max_region_px,
+                  [parse_box(box) for box in args.protect_box])
+        elif args.command == "settings":
+            show_settings(args.source)
         elif args.command == "compare":
-            compare(args.source, args.reference, args.output)
+            compare(args.source, args.reference, args.output, args.max_megapixels)
         else:
-            polish(args.source, args.output)
+            polish(args.source, args.output, args.max_megapixels)
     except (EOFError, OSError, ValueError, KeyError) as error:
         parser.exit(1, f"Error: {error}\n")
 
