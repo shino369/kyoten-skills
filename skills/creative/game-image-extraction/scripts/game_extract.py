@@ -3,6 +3,12 @@
 
 Verification is strictly metadata-only (file counts, zero-byte checks, PNG/JPEG header magic) and never decodes
 or renders pixels, keeping sensitive/NSFW game assets safe from accidental viewing.
+
+Run it through the `ge` helper in SKILL.md (`geu` for unity-extract), from a folder you trust, never from inside
+the game folder: uv reads pyproject.toml, uv.toml, and .venv from the folder it runs in.
+
+  uv run --no-project --no-config --no-build --python 3.12 --with pillow==13.0.0 \\
+    python -I game_extract.py detect "<game_dir>" --json
 """
 
 from __future__ import annotations
@@ -437,8 +443,8 @@ def default_unity_loader() -> Callable[[str], Any]:
         import UnityPy  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError(
-            "UnityPy is required for Unity extraction. Run with: "
-            "uv run --python 3.12 --with UnityPy --with pillow python game_extract.py unity-extract ..."
+            "UnityPy is required for Unity extraction. Run unity-extract through the geu helper in SKILL.md, "
+            "which pins UnityPy and its dependencies."
         ) from exc
     return UnityPy.load
 
