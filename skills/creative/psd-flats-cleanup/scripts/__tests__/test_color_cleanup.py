@@ -6,6 +6,7 @@ same assertions. The rest cover every remaining branch.
 
 import errno
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -521,7 +522,14 @@ def test_polish_removes_the_psd_when_the_review_cannot_be_published(tmp_path, mo
         real_link(src, dst)
 
     monkeypatch.setattr(cc.os, "link", link)
-    monkeypatch.setattr(cc.shutil, "copyfileobj", lambda a, b: (_ for _ in ()).throw(OSError(errno.ENOSPC, "disk full")))
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if str(dst).endswith(".png"):
+            raise OSError(errno.ENOSPC, "disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cc.os, "replace", replace)
     with pytest.raises(OSError, match="disk full"):
         cc.polish(source)
     assert not source.with_name("art-polished.psd").exists()
@@ -779,3 +787,103 @@ def test_settings_prints_what_polish_would_apply(tmp_path, capsys):
     with pytest.raises(SystemExit):
         cc.main(["settings", str(source)])
     assert "cannot also have a role" in capsys.readouterr().err
+
+
+# ---------- review round 2 ----------
+
+
+def test_polish_keeps_japanese_flat_names(tmp_path):
+    owner, ink = geometry()
+    source = artwork(tmp_path / "jp.psd", owner, ink)
+    psd = read_psd(source)
+    psd[1][0][0].name = "下塗り"
+    psd.save(source)
+    configure(source)
+    cc.polish(source)
+    out = read_psd(source.with_name("jp-polished.psd"))
+    assert [layer.name for layer in out[1][0]] == ["下塗り", "下塗り (polished)"]
+
+
+def test_polished_name_stays_within_the_psd_limit(tmp_path):
+    source = artwork(tmp_path / "long.psd")
+    psd = read_psd(source)
+    psd[1][0][0].name = "x" * 250
+    psd.save(source)
+    configure(source)
+    cc.polish(source)
+    name = read_psd(source.with_name("long-polished.psd"))[1][0][1].name
+    assert len(name) == 255 and name.endswith("x (polished)")
+
+
+def two_flats_one_group(path):
+    owner, ink = geometry()
+    psd = PSDImage.new("RGB", owner.shape[::-1])
+    psd.create_pixel_layer(Image.new("RGB", psd.size, "white"), name="Paper")
+    group = psd.create_group(name="Paint")
+    left = np.zeros(owner.shape, bool)
+    left[:, :62] = True
+    PixelLayer.fromarray(rgba((owner == 1) & left), group, name="Hair")
+    PixelLayer.fromarray(rgba((owner == 1) & ~left, (60, 90, 170)), group, name="Hair")
+    lines = np.zeros((*ink.shape, 4), np.uint8)
+    lines[..., 3] = ink
+    PixelLayer.fromarray(lines, psd, name="Ink")
+    psd.save(path)
+    return path
+
+
+def test_compare_refuses_two_flats_with_one_path(tmp_path):
+    source = two_flats_one_group(tmp_path / "same.psd")
+    configure(source, lineart="4", flat="2,3", background="1")
+    with pytest.raises(ValueError, match="Two flats share the path Paint / Hair"):
+        cc.compare(source, source)
+
+
+def test_compare_names_the_flats_it_did_not_score(tmp_path, capsys):
+    source = two_hair_flats(tmp_path / "pair.psd")
+    configure(source, lineart="4", flat="2,3", background="1")
+    finished = read_psd(source)
+    finished[1].name = "Girls"
+    finished.save(tmp_path / "moved.psd")
+    capsys.readouterr()
+    cc.compare(source, tmp_path / "moved.psd")
+    assert "Not scored (hidden, or not found at the same path): Girl / Hair" in capsys.readouterr().out
+
+
+def test_output_never_fails_on_a_narrow_console_encoding(monkeypatch):
+    narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", narrow)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())  # Not a TextIOWrapper: left as it is.
+    cc.safe_console()
+    print("下塗り")
+    narrow.flush()
+    assert narrow.buffer.getvalue().strip() == b"\\u4e0b\\u5857\\u308a"
+
+
+def test_an_optional_role_error_does_not_ask_for_one(tmp_path, capsys):
+    source = artwork(tmp_path / "art.psd")
+    with pytest.raises(SystemExit):
+        cc.main(["setup", str(source), "--accept", "--ignore", "9"])
+    assert "at least one" not in capsys.readouterr().err
+
+
+def test_settings_runs_every_check_that_polish_runs(tmp_path, capsys):
+    source = artwork(tmp_path / "art.psd")
+    config = configure(source)
+    for change, message in ((dict(protect_boxes=[[0, 0, 500, 10]]), "within the canvas"),
+                            (dict(ignore=[{"index": [9], "names": ["Gone"]}]), "Ignored layer moved")):
+        cc.config_path(source).write_text(json.dumps({**config, **change}), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            cc.main(["settings", str(source)])
+        assert message in capsys.readouterr().err
+
+
+def test_publish_without_hard_links_never_leaves_a_partial_file(tmp_path, monkeypatch):
+    staged = tmp_path / "stage" / "out.psd"
+    staged.parent.mkdir()
+    staged.write_bytes(b"whole file")
+    target = tmp_path / "out.psd"
+    monkeypatch.setattr(cc.os, "link", lambda a, b: (_ for _ in ()).throw(OSError(errno.ENOTSUP, "no links")))
+    monkeypatch.setattr(cc.os, "replace", lambda a, b: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        cc.publish(staged, target)
+    assert not target.exists() and staged.read_bytes() == b"whole file"

@@ -1,10 +1,11 @@
 # Learning from a file the artist finished by hand
 
-`pfc compare Art.psd Art-finished.psd [--output diff.png]` reruns the tool on the source with the
+`pfc compare Art.psd Art-finished.psd [--output "/path/to/diff.png"]` reruns the tool on the source with the
 saved settings and scores it against a finished copy: a polished PSD whose `(polished)` flats the
 artist corrected by hand (or the original flats, if a flat was not polished). Each flat is matched
 by its full group path (`Girl / Hair (polished)`), so flats with the same name in different groups
-are scored separately; a path that appears twice in the finished file stops the comparison.
+are scored separately. Two flats with the same path, or a path that appears twice in the finished
+file, stop the comparison; a flat not found at its path is listed as not scored.
 
 It prints:
 

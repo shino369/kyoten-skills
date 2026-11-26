@@ -83,7 +83,8 @@ If the file does not fit, say what to change (flatten effects into a copy, uncli
    it to the user before polishing.
 4. **Run it.** `pfc polish Art.psd` prints the settings it applies, then writes `Art-polished.psd`
    and `Art-polished-review.png` next to the source. It refuses to overwrite either; use
-   `--output Art-v2.psd` for another run.
+   `--output "/path/to/Art-v2.psd"` (an absolute path next to the source; a bare name lands in the
+   folder you run from) for another run.
 5. **Read the review PNG yourself.** It has three panels: before, after, and the after image with
    **mint** over every edited pixel and **amber** over unpainted pockets that were filled with the
    nearest colour. Amber areas are the ones to check. The image is three canvases wide, so crop the

@@ -15,11 +15,11 @@ copying where a volume has no hard links, and matching flats by group path in `c
 import argparse
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import io
 import json
 import math
 import os
 import re
-import shutil
 import sys
 import unicodedata
 
@@ -67,10 +67,12 @@ def layer_path(layer):
 
 
 def publish(staged, path):
-    """Put a finished file at `path` without replacing anything there.
+    """Move a finished file from the staging folder to `path` without replacing anything there.
 
-    A hard link is atomic. Volumes without hard links (exFAT, FAT32, some network shares) get
-    an exclusive copy instead; both refuse an existing file or symlink.
+    A hard link is atomic. Where a volume has none (exFAT, FAT32, some network shares), reserve
+    the name with an exclusive create, then rename the whole staged file over the reservation,
+    so a killed run never leaves a partial file under the real name. Both refuse an existing file
+    or symlink.
     """
     try:
         os.link(staged, path)
@@ -79,13 +81,20 @@ def publish(staged, path):
         raise
     except OSError:
         pass
-    with open(staged, "rb") as source, open(path, "xb") as target:
-        try:
-            shutil.copyfileobj(source, target)
-        except BaseException:
-            target.close()
-            path.unlink()
-            raise
+    open(path, "xb").close()
+    try:
+        os.replace(staged, path)
+    except BaseException:
+        path.unlink()
+        raise
+
+
+def safe_console():
+    """Print what the console cannot encode (names on a Windows code page) as escapes instead of
+    failing. `python -I` ignores PYTHONIOENCODING and PYTHONUTF8, so this is done here."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="backslashreplace")
 
 
 def raster_layers(group, indices=(), names=()):
@@ -252,7 +261,7 @@ def parse_numbers(answer, defaults, role, count):
     if ids is None or len(ids) != len(set(ids)) or any(i < 1 or i > count for i in ids) \
             or (role in ("lineart", "flat") and not ids):
         raise ValueError(f"{role}: enter comma-separated layer numbers from the table"
-                         f"{'' if role in ('background', 'protect') else ' (at least one)'}.")
+                         f"{' (at least one)' if role in ('lineart', 'flat') else ''}.")
     return ids
 
 
@@ -549,8 +558,10 @@ def apply_corrections(psd, flats, target):
         else:
             data[local][trim_inside] = 0
         parent = original.parent
-        corrected = PixelLayer.fromarray(data, parent, name=f"{original.name} (polished)",
+        corrected = PixelLayer.fromarray(data, parent, name="polished",
                                          top=top, left=left, compression=Compression.RLE)
+        # The setter also stores a Unicode name (a Japanese name cannot go in the legacy field).
+        corrected.name = f"{original.name[:255 - len(' (polished)')]} (polished)"
         corrected_pos = parent.index(original) + 1
         parent.insert(corrected_pos, corrected)
         original.visible = False
@@ -585,6 +596,19 @@ def load(source, max_megapixels=MAX_MEGAPIXELS):
         raise ValueError(f"The canvas is {canvas['width']}×{canvas['height']} ({canvas['megapixels']:.1f} MP) and needs "
                          f"about {canvas['memory_gb']:.0f} GB of memory or more. If this machine has it, run again with "
                          f"--max-megapixels {math.ceil(canvas['megapixels'])}.")
+    config, layers, island = read_settings(psd, source)
+    shape = (psd.height, psd.width)
+    print(f"Settings from {config_path(source).name}")
+    print_settings(config, island)
+    top, solid, shield = read_paint(shape, layers["flat"], layers["protect"], config.get("protect_boxes", []))
+    ink = read_ink(shape, layers["lineart"])
+    print("Matching paint to the lines…", flush=True)
+    corrections, pockets = correction_map(top, solid, shield, ink, len(layers["flat"]) + 1, island)
+    return psd, layers, top, ink, corrections, pockets
+
+
+def read_settings(psd, source):
+    """Load and check the saved settings against the open PSD; hide the ignored layers."""
     config = json.loads(config_path(source).read_text(encoding="utf-8"))
     layers = resolve_config(psd, config)
     available = {tuple(ref["index"]): (ref, layer) for ref, layer in raster_layers(psd)}
@@ -596,24 +620,16 @@ def load(source, max_megapixels=MAX_MEGAPIXELS):
     for ref in config.get("ignore", []):
         available[tuple(ref["index"])][1].visible = False
     shape = (psd.height, psd.width)
-    island = region_px(config, shape)
-    print(f"Settings from {config_path(source).name}")
-    print_settings(config, island)
-    top, solid, shield = read_paint(shape, layers["flat"], layers["protect"], config.get("protect_boxes", []))
-    ink = read_ink(shape, layers["lineart"])
-    print("Matching paint to the lines…", flush=True)
-    corrections, pockets = correction_map(top, solid, shield, ink, len(layers["flat"]) + 1, island)
-    return psd, layers, top, ink, corrections, pockets
+    for box in config.get("protect_boxes", []):
+        check_box(box, shape)
+    return config, layers, region_px(config, shape)
 
 
 def show_settings(source):
-    """Print the settings polish would apply, checked, with names escaped."""
-    psd = read_psd(source)
-    config = json.loads(config_path(source).read_text(encoding="utf-8"))
-    resolve_config(psd, config)
-    check_ignore(config)
+    """Print the settings polish would apply, after the same checks, with names escaped."""
+    config, _, island = read_settings(read_psd(source), source)
     print(f"Settings from {config_path(source).name}")
-    print_settings(config, region_px(config, (psd.height, psd.width)))
+    print_settings(config, island)
 
 
 def compare(source, reference, output=None, max_megapixels=MAX_MEGAPIXELS):
@@ -625,6 +641,10 @@ def compare(source, reference, output=None, max_megapixels=MAX_MEGAPIXELS):
         raise FileExistsError(f"{output} already exists. Choose another --output name.")
     print("Reading flats and lineart…", flush=True)
     psd, layers, top, ink, corrections, _ = load(source, max_megapixels)
+    paths = [layer_path(flat) for flat in layers["flat"]]
+    for path in paths:
+        if paths.count(path) > 1:
+            raise ValueError(f"Two flats share the path {path_text(path)}. Rename one in both files.")
     finished = read_psd(reference)
     if finished.size != psd.size:
         raise ValueError("The finished PSD must have the same canvas size as the source.")
@@ -646,7 +666,7 @@ def compare(source, reference, output=None, max_megapixels=MAX_MEGAPIXELS):
         canvas, local = window(flat, top.shape)
         data = pixels(flat)[local]
         colors[index] = np.median(data[data[..., 3] >= 240, :3], axis=0)
-        path = layer_path(flat)
+        path = paths[index - 1]
         layer = find((*path[:-1], f"{path[-1]} (polished)"))
         layer = find(path) if layer is None else layer
         if layer is None or not layer.is_visible() or not layer.width:
@@ -663,7 +683,9 @@ def compare(source, reference, output=None, max_megapixels=MAX_MEGAPIXELS):
           f"The tool matches {100 * np.count_nonzero(asked & ~wrong) / max(1, np.count_nonzero(asked)):.1f}% of them.")
     print(f"The tool changed {np.count_nonzero(kept & wrong):,} pixels that the artist left alone. "
           f"{np.count_nonzero(wrong):,} pixels still differ.")
-    names = ["nothing"] + [path_text(layer_path(flat)) for flat in layers["flat"]]
+    names = ["nothing"] + [path_text(path) for path in paths]
+    if dropped:
+        print(f"Not scored (hidden, or not found at the same path): {', '.join(names[i] for i in dropped)}")
     pairs, counts = np.unique(tool[wrong].astype(np.int64) * len(names) + truth[wrong], return_counts=True)
     for pair, count in sorted(zip(pairs, counts), key=lambda item: -item[1])[:8]:
         print(f"  {count:>7,}  tool: {names[pair // len(names)]}   artist: {names[pair % len(names)]}")
@@ -749,6 +771,7 @@ def main(argv=None):
                              help=f"refuse larger canvases (default {MAX_MEGAPIXELS}; about "
                                   f"{BYTES_PER_PIXEL * 1e6 / 1e9:.2f} GB of memory per megapixel)")
     args = parser.parse_args(argv)
+    safe_console()
     try:
         if args.command == "layers":
             psd = read_psd(args.source)
