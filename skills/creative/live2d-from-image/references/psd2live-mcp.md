@@ -18,7 +18,7 @@
      python inference/scripts/inference_psd_quantized.py --srcp path/to/char.png --save_to_psd
      ```
    - Outputs center-square-padded 1280² layers; invert padding back to native source dimensions with `unpad_params(orig_w, orig_h, psd.width)` and `map_bbox(...)` from `scripts/live2d_pipeline.py` (done automatically by `recover-single`).
-   - **macOS / Apple Silicon:** Upstream See-through expects CUDA (`bitsandbytes` / `cu128`) and MPS is unreliable; use a CUDA machine or the official HuggingFace Space / ModelScope demo (ask the user before uploading artwork).
+   - **macOS / Apple Silicon:** Upstream See-through expects CUDA (`cu128`; `bitsandbytes` only for the NF4 low-VRAM path). An MPS run is possible with a small device patch but slow and memory-heavy, and its quality is unverified against CUDA (see SKILL.md Prerequisites); prefer a CUDA machine or the official HuggingFace Space / ModelScope demo (ask the user before uploading artwork).
 2. **PSD2Live 3.8.4+** ([tsunehimatoi/psd2live releases](https://github.com/tsunehimatoi/psd2live/releases)):
    - Point `scripts/live2d_pipeline.py run-p2l` at it via `--p2l-dir <path>` or `PSD2LIVE_DIR`:
      - **Windows portable:** `<dir>/app/`, `<dir>/runtime/bin/java.exe`, `<dir>/mcp_proxy.py`

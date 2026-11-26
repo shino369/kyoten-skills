@@ -20,7 +20,7 @@ Two cross-platform CLI scripts handle the deterministic parts of the pipeline:
    - Auto-downloads HuggingFace weights on first run: `layerdifforg/seethroughv0.0.2_layerdiff3d`, `24yearsold/seethroughv0.0.1_marigold`, and `24yearsold/l2d_sam_iter2`.
    - Main CLI command (run from the See-through repo root):
      `python inference/scripts/inference_psd.py --srcp <input.png> --save_to_psd`
-   - **macOS / Apple Silicon note:** Upstream See-through assumes CUDA; MPS is unverified and unreliable. On macOS, run See-through on a CUDA machine or use the official HuggingFace Space / ModelScope demo (ask the user before uploading artwork).
+   - **macOS / Apple Silicon note:** Upstream See-through hard-codes CUDA. It can run on Apple Silicon via MPS after replacing the hard-coded `device='cuda'` (and optionally `torch.bfloat16`) in `common/utils/inference_utils.py` with a configurable device and setting `PYTORCH_ENABLE_MPS_FALLBACK=1`, but it is slow and memory-heavy (one 1280px run on an M4 Pro 48 GB: ~42 min, ~46 GB peak memory) and its layer quality has not been compared with CUDA output. Prefer a CUDA machine (local or cloud GPU) or the official HuggingFace Space / ModelScope demo (ask the user before uploading artwork).
 3. **PSD2Live 3.8.4+** ([tsunehimatoi/psd2live releases](https://github.com/tsunehimatoi/psd2live/releases)) — headless MCP rigging & export:
    - Pass `--p2l-dir <path>` or set `PSD2LIVE_DIR`:
      - **Windows portable:** `<dir>` containing `app/`, `runtime/bin/java.exe`, and `mcp_proxy.py`
