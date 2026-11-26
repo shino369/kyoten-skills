@@ -28,7 +28,7 @@ Notice: entry #0 in protected XP3s is commonly an unprotected plaintext stub (`W
 Unpack directly with `game_extract.py` (supports XP3 v1 & v2, compressed/uncompressed indices and segments, and strips path traversal):
 
 ```bash
-uv run --quiet --python 3.12 python -I path/to/game_extract.py xp3-unpack "<game_dir>/bgimage.xp3" -o "<out_dir>/raw/bgimage"
+ge xp3-unpack "<game_dir>/bgimage.xp3" -o "<out_dir>/raw/bgimage"
 ```
 
 Then convert any `.tlg` or `.pimg`/`.psb` files with `convert-raw` and verify with `verify`.
@@ -45,12 +45,14 @@ git clone --depth 1 https://github.com/hktkqj/cxdec-hxv4-static-analysis.git "<t
 
 ### 2. Probe PE Resources (`--skip-derive`)
 
+Run every command below from the workspace root or another folder you trust, never from `$repo` or the game folder, with the same isolation flags as the helpers in [SKILL.md](../SKILL.md) (`--no-project --no-config --no-build --exclude-newer P7D`, pinned packages). `$GE_PY` is the absolute path set there.
+
 ```powershell
 $repo = "<tmp>\cxdec-hxv4-static-analysis"
 $work = "<tmp>\recover"
 $exe  = "<game_dir>\<game>.exe"
 
-uv run --python cpython-3.12-windows-x86_64-none --with pycryptodome --with pillow python "$repo\src\static_extract\static_xp3_recover.py" --exe $exe --work-dir $work --skip-derive --debug
+uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86_64-none --with pycryptodome==4.5.0 --with pillow==13.0.0 python "$repo\src\static_extract\static_xp3_recover.py" --exe $exe --work-dir $work --skip-derive --debug
 ```
 
 Successful output recovers:
@@ -64,7 +66,7 @@ Successful output recovers:
 The recovered `bootstrap.dll` is a 32-bit PE DLL, so key derivation must run in a 32-bit process:
 
 - **If `.NET 8 x86` SDK/runtime is installed** (`C:\Program Files (x86)\dotnet\dotnet.exe`): run `static_xp3_recover.py` without `--skip-derive`.
-- **If `.NET 8 x86` is NOT installed** (common on 64-bit Windows machines): use the 32-bit Python fallback below (`uv run --python cpython-3.12-windows-x86-none`).
+- **If `.NET 8 x86` is NOT installed** (common on 64-bit Windows machines): use the 32-bit Python fallback below (`uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86-none`).
 
 ### 4. Verify Checksums Before Full Extraction (Use 64-bit Python!)
 
@@ -73,7 +75,7 @@ Always use **64-bit Python** (`cpython-3.12-windows-x86_64-none`) for `xp3_inspe
 ```powershell
 $targets = @("image.xp3", "uipsd.xp3", "bgimage.xp3", "fgimage.xp3", "evimage.xp3", "evimage2.xp3", "patch.xp3") | ForEach-Object { Join-Path "<game_dir>" $_ }
 
-uv run --python cpython-3.12-windows-x86_64-none --with pycryptodome --with pillow python "$repo\src\common\xp3_inspect.py" verify @targets --filter recovered --drip-program "$work\drip_program.json" --max-entries 10
+uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86_64-none --with pycryptodome==4.5.0 --with pillow==13.0.0 python "$repo\src\common\xp3_inspect.py" verify @targets --filter recovered --drip-program "$work\drip_program.json" --max-entries 10
 ```
 
 Confirm `failed=0 unresolved_filter=0` for every archive before extracting.
@@ -82,17 +84,17 @@ Confirm `failed=0 unresolved_filter=0` for every archive before extracting.
 
 ```powershell
 $outRaw = "<out_dir>\raw"
-uv run --python cpython-3.12-windows-x86_64-none --with pycryptodome --with pillow python "$repo\src\common\xp3_inspect.py" extract-all $outRaw @targets --filter recovered --drip-program "$work\drip_program.json"
+uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86_64-none --with pycryptodome==4.5.0 --with pillow==13.0.0 python "$repo\src\common\xp3_inspect.py" extract-all $outRaw @targets --filter recovered --drip-program "$work\drip_program.json"
 
-uv run --python cpython-3.12-windows-x86_64-none python "$repo\tools\scan_headers.py" -i $outRaw -o "$outRaw\file_type_report.txt" --layout flat
+uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86_64-none python "$repo\tools\scan_headers.py" -i $outRaw -o "$outRaw\file_type_report.txt" --layout flat
 ```
 
 ### 6. Convert Raw `.bin` Files to PNG/JPG & Verify (Metadata-Only)
 
 ```powershell
-uv run --python cpython-3.12-windows-x86_64-none --with pillow python -I path/to/game_extract.py convert-raw $outRaw -o "<out_dir>\images" --tlg2png "$repo\tools\tlg2png\tlg2png.exe" --psb-parser "$repo\tools\psb_parser.py"
+uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86_64-none --with pillow==13.0.0 python -I $GE_PY convert-raw $outRaw -o "<out_dir>\images" --tlg2png "$repo\tools\tlg2png\tlg2png.exe" --psb-parser "$repo\tools\psb_parser.py"
 
-uv run --python cpython-3.12-windows-x86_64-none python -I path/to/game_extract.py verify "<out_dir>\images" --json
+uv run --no-project --no-config --no-build --exclude-newer P7D --python cpython-3.12-windows-x86_64-none python -I $GE_PY verify "<out_dir>\images" --json
 ```
 
 ## 32-bit Python Key Derivation Fallback (When `.NET 8 x86` Is Missing)

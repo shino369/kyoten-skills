@@ -7,23 +7,27 @@ description: Extract, convert, and verify image assets (CGs, backgrounds, charac
 
 Extract image assets from local Unity and KiriKiri2/KiriKiriZ games cleanly into PNG/JPG folders without modifying the game installation directory.
 
-One cross-platform CLI script, `scripts/game_extract.py`, handles engine detection, Unity extraction, plain XP3 inspection/unpacking, raw `.bin` conversion (PNG/JPG/TLG/PSB-PIMG), and metadata-only verification. Run it through `uv` (no global installs):
+One cross-platform CLI script, `scripts/game_extract.py`, handles engine detection, Unity extraction, plain XP3 inspection/unpacking, raw `.bin` conversion (PNG/JPG/TLG/PSB-PIMG), and metadata-only verification. Run it through `uv` (no global installs) with the pinned versions below. Define the helpers in each shell command that uses them. Set `GE_PY` to the absolute path of `scripts/game_extract.py` inside the folder that holds this SKILL.md (Claude Code shows it as the skill's base directory; a project install is `<workspace>/.agents/skills/game-image-extraction/`). Never derive it from the current directory: a repository you are inside could hold its own copy.
 
-PowerShell:
+**Run `ge` and `geu` from the workspace root or another folder you trust, never from inside the game folder or a folder of extracted files.** uv reads `pyproject.toml`, `uv.toml`, and `.venv` from the current folder and its parents, so a folder that came with the game could change what gets installed and run. `--no-project --no-config` keeps the first two out; the folder rule covers the rest. Pass game and output folders as absolute paths or paths relative to that folder.
+
+PowerShell (`cmd.exe` has no functions, so use PowerShell or Git Bash):
 
 ```powershell
-$GE_PY = Join-Path (git rev-parse --show-toplevel) '.agents/skills/game-image-extraction/scripts/game_extract.py'
-function ge { uv run --quiet --python 3.12 --with UnityPy --with pillow python -I $GE_PY @args }
+$GE_PY = 'C:\absolute\path\to\game-image-extraction\scripts\game_extract.py'
+function ge { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 python -I $GE_PY @args }
+function geu { uv run --no-project --no-config --exclude-newer P7D --python 3.12 --with UnityPy==1.25.4 --with tpk-ar==0.2.4 --with pillow==13.0.0 --with archspec==0.2.7 --with astc-encoder-py==0.1.12 --with attrs==26.1.0 --with brotli==1.2.1 --with etcpak==0.9.15 --with fmod-toolkit==0.1.3 --with fsspec==2026.9.0 --with lz4==4.4.5 --with pyfmodex==0.7.2 --with texture2ddecoder==1.0.6 python -I $GE_PY @args }
 ```
 
 bash / zsh / Git Bash:
 
 ```bash
-GE_PY="$(git rev-parse --show-toplevel)/.agents/skills/game-image-extraction/scripts/game_extract.py"
-ge() { uv run --quiet --python 3.12 --with UnityPy --with pillow python -I "$GE_PY" "$@"; }
+GE_PY="/absolute/path/to/game-image-extraction/scripts/game_extract.py"
+ge() { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with pillow==13.0.0 python -I "$GE_PY" "$@"; }
+geu() { uv run --no-project --no-config --exclude-newer P7D --python 3.12 --with UnityPy==1.25.4 --with tpk-ar==0.2.4 --with pillow==13.0.0 --with archspec==0.2.7 --with astc-encoder-py==0.1.12 --with attrs==26.1.0 --with brotli==1.2.1 --with etcpak==0.9.15 --with fmod-toolkit==0.1.3 --with fsspec==2026.9.0 --with lz4==4.4.5 --with pyfmodex==0.7.2 --with texture2ddecoder==1.0.6 python -I "$GE_PY" "$@"; }
 ```
 
-When running only KiriKiri commands (`detect`, `xp3-inspect`, `xp3-unpack`, `verify`), `UnityPy` and `pillow` are not required. For `convert-raw` with `--psb-parser`, include `--with pillow` so `psb_parser.py` can compose `.pimg` layers.
+`ge` runs every command except `unity-extract`: `detect`, `xp3-inspect`, `xp3-unpack`, `convert-raw` (Pillow lets `psb_parser.py` compose `.pimg` layers), and `verify`. It installs wheels only (`--no-build`). `geu` adds UnityPy for `unity-extract` and pins every package UnityPy pulls in, but it cannot use `--no-build`: UnityPy 1.25.3 and later need `tpk-ar`, which is published only as source, so uv builds it (pure Python, no `setup.py`). In both helpers, `--exclude-newer P7D` makes uv ignore files uploaded in the last 7 days: a file added later to a pinned release is not picked up, and in `geu` it also covers the setuptools that builds `tpk-ar`. It needs uv 0.9.17 or later (`uv --version`). Some of `geu`'s packages have no wheel for every platform: UnityPy 1.25.4 has none for Linux on ARM (aarch64), lz4 4.4.5 none for musl Linux such as Alpine, and etcpak 0.9.15 none for Windows on ARM. There uv compiles them from source, which needs a C/C++ compiler. `--no-config` also skips your own uv settings, such as a private index.
 
 ## Safety & Content-Sensitivity Rules
 
@@ -56,7 +60,7 @@ Also check free disk space before extracting large archives (uncompressed PNGs a
 #### Unity (`unity-extract`)
 
 ```bash
-ge unity-extract "<game_dir>/<name>_Data" -o "<out_dir>"
+geu unity-extract "<game_dir>/<name>_Data" -o "<out_dir>"
 ```
 
 - Skips voice, BGM, movie, font, and localization-script bundles by default (often 70–85% of game size). Pass `--include-all` to scan every bundle.
@@ -119,5 +123,5 @@ Report to the user:
 When developing inside the skill repository, run the Python test suite with 100% branch coverage:
 
 ```bash
-uv run --quiet --python 3.12 --with pytest --with pytest-cov --with pillow python -I -B -m pytest -q -p no:cacheprovider skills/creative/game-image-extraction/scripts --cov=game_extract --cov-branch --cov-fail-under=100
+pnpm test:python:game-extract
 ```
