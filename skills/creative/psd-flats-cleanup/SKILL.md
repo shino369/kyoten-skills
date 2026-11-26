@@ -27,7 +27,7 @@ bash / zsh / Git Bash:
 
 ```bash
 PFC_PY="/absolute/path/to/psd-flats-cleanup/scripts/color_cleanup.py"
-pfc() { uv run --no-project --no-config --no-build --python 3.12 --with 'psd-tools[composite]==1.27.0' --with numpy==2.5.5 --with pillow==13.0.0 --with scipy==1.18.1 --with attrs==26.1.0 --with aggdraw==1.4.1 python -I "$PFC_PY" "$@"; }
+pfc() { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with 'psd-tools[composite]==1.27.0' --with numpy==2.5.5 --with pillow==13.0.0 --with scipy==1.18.1 --with attrs==26.1.0 --with aggdraw==1.4.1 python -I "$PFC_PY" "$@"; }
 pfc layers "/path/to/Art.psd"
 ```
 
@@ -35,12 +35,18 @@ PowerShell (`cmd.exe` has no functions, so use PowerShell or Git Bash):
 
 ```powershell
 $PFC_PY = 'C:\absolute\path\to\psd-flats-cleanup\scripts\color_cleanup.py'
-function pfc { uv run --no-project --no-config --no-build --python 3.12 --with 'psd-tools[composite]==1.27.0' --with numpy==2.5.5 --with pillow==13.0.0 --with scipy==1.18.1 --with attrs==26.1.0 --with aggdraw==1.4.1 python -I $PFC_PY @args }
+function pfc { uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 --with 'psd-tools[composite]==1.27.0' --with numpy==2.5.5 --with pillow==13.0.0 --with scipy==1.18.1 --with attrs==26.1.0 --with aggdraw==1.4.1 python -I $PFC_PY @args }
 pfc layers 'C:\path\to\Art.psd'
 ```
 
 `--no-build` installs wheels only (all six packages have them for Python 3.12 on macOS, Linux, and
-Windows). `--no-config` also skips your own uv settings, such as a private index.
+Windows). `--exclude-newer P7D` makes uv ignore files uploaded in the last 7 days, so a file added
+later to a pinned release is not picked up; it needs uv 0.9.17 or later (`uv --version`).
+`--no-config` also skips your own uv settings, such as a private index.
+
+In PowerShell, always quote comma-separated flag values (`--lineart '5,6'`,
+`--protect-box '120,80,180,140'`, `--ignore '7,8'`): bare commas are parsed as arrays and split
+into separate arguments. Single quotes work in both PowerShell and bash.
 
 The first run downloads the packages. Memory grows with the canvas: a 4160×3200 test file with one
 flat took 12 s and 4.2 GB, and each extra flat adds time. `pfc layers` prints the canvas size and a
@@ -72,12 +78,12 @@ If the file does not fit, say what to change (flatten effects into a copy, uncli
    - `flat`: the paint to repair.
    - `background`: paper or backdrop below the flats (optional). Trimmed paint shows it again.
    - `protect`: paint and details that must not change, such as eye whites (optional).
-3. **Save the settings.** `pfc setup Art.psd --lineart 5,6 --flat 2,3 --background 1 --protect -`
+3. **Save the settings.** `pfc setup Art.psd --lineart '5,6' --flat '2,3' --background 1 --protect -`
    writes `Art.cleanup.json` next to the PSD and prints what it saved. An omitted role takes the
    suggestion; `-` means none; `--accept` alone takes every suggestion. Without any role flag,
    setup asks on the terminal, which an agent cannot answer, so always pass flags. The other
    settings are flags too: `--ignore 7` (hide a notes layer in the copy), `--max-region-px 48`,
-   `--protect-box 120,80,180,140` (repeat for more). Setup refuses to overwrite an existing
+   `--protect-box '120,80,180,140'` (repeat for more). Setup refuses to overwrite an existing
    settings file: move the old one to a `backup/<yymmdd-hhmm>/` folder first. If a settings file
    is already there that you did not create in this session, run `pfc settings Art.psd` and show
    it to the user before polishing.
@@ -93,7 +99,7 @@ If the file does not fit, say what to change (flatten effects into a copy, uncli
 
    | Symptom                                           | Fix                                                                 |
    | ------------------------------------------------- | ------------------------------------------------------------------- |
-   | A highlight of bare canvas got painted            | `--protect-box left,top,right,bottom` around it                     |
+   | A highlight of bare canvas got painted            | `--protect-box 'left,top,right,bottom'` around it                   |
    | Eye whites or details changed                     | Give their layer the `protect` role                                 |
    | Bigger block-in errors were left alone            | Raise `--max-region-px`                                             |
    | Small correct shapes were absorbed by a neighbour | Lower `--max-region-px`                                             |

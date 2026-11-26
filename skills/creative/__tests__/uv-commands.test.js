@@ -392,10 +392,16 @@ describe('creative skill docs', () => {
       counted[join('game-image-extraction', 'SKILL.md')]
     ).toBeGreaterThanOrEqual(4);
     expect(
+      counted[join('psd-flats-cleanup', 'SKILL.md')]
+    ).toBeGreaterThanOrEqual(2);
+    expect(
       counted[join('transparent-background', 'scripts', 'imgalpha.py')]
     ).toBe(1);
     expect(
       counted[join('game-image-extraction', 'scripts', 'game_extract.py')]
+    ).toBe(1);
+    expect(
+      counted[join('psd-flats-cleanup', 'scripts', 'color_cleanup.py')]
     ).toBe(1);
   });
 

@@ -7,9 +7,10 @@ repository's MIT license with the author's agreement. Added for agents: the `lay
 `settings` commands, setup flags instead of prompts and hand edits, a canvas size limit,
 copying where a volume has no hard links, and matching flats by group path in `compare`.
 
-  uv run --no-project --no-config --no-build --python 3.12 --with 'psd-tools[composite]==1.27.0' \\
-    --with numpy==2.5.5 --with pillow==13.0.0 --with scipy==1.18.1 --with attrs==26.1.0 \\
-    --with aggdraw==1.4.1 python -I color_cleanup.py layers Artwork.psd
+  uv run --no-project --no-config --no-build --exclude-newer P7D --python 3.12 \\
+    --with 'psd-tools[composite]==1.27.0' --with numpy==2.5.5 --with pillow==13.0.0 \\
+    --with scipy==1.18.1 --with attrs==26.1.0 --with aggdraw==1.4.1 \\
+    python -I color_cleanup.py layers Artwork.psd
 """
 
 import argparse
@@ -532,6 +533,11 @@ def correction_map(top, solid, shield, ink, kinds, island):
     return np.where(fix, want, -1).astype(np.int16), pocket[regions] & ~shield
 
 
+def polished_name(name):
+    """Name for a polished flat copy, truncated to fit the 255-character PSD layer limit."""
+    return f"{name[:255 - len(' (polished)')]} (polished)"
+
+
 def apply_corrections(psd, flats, target):
     changed = 0
     for index, original in enumerate(flats, 1):
@@ -561,7 +567,7 @@ def apply_corrections(psd, flats, target):
         corrected = PixelLayer.fromarray(data, parent, name="polished",
                                          top=top, left=left, compression=Compression.RLE)
         # The setter also stores a Unicode name (a Japanese name cannot go in the legacy field).
-        corrected.name = f"{original.name[:255 - len(' (polished)')]} (polished)"
+        corrected.name = polished_name(original.name)
         corrected_pos = parent.index(original) + 1
         parent.insert(corrected_pos, corrected)
         original.visible = False
@@ -667,7 +673,7 @@ def compare(source, reference, output=None, max_megapixels=MAX_MEGAPIXELS):
         data = pixels(flat)[local]
         colors[index] = np.median(data[data[..., 3] >= 240, :3], axis=0)
         path = paths[index - 1]
-        layer = find((*path[:-1], f"{path[-1]} (polished)"))
+        layer = find((*path[:-1], polished_name(path[-1])))
         layer = find(path) if layer is None else layer
         if layer is None or not layer.is_visible() or not layer.width:
             dropped.append(index)  # Hidden or removed in the finished file: not scored.

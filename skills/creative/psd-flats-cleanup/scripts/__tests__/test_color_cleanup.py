@@ -574,7 +574,23 @@ def test_publish_refuses_an_existing_file_even_without_hard_links(tmp_path, monk
     staged = tmp_path / "staged.bin"
     staged.write_bytes(b"new")
     target = tmp_path / "target.bin"
-    target.symlink_to(tmp_path / "missing")
+    target.write_bytes(b"existing")
+    with pytest.raises(FileExistsError):
+        cc.publish(staged, target)
+    monkeypatch.setattr(cc.os, "link", lambda a, b: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross-device")))
+    with pytest.raises(FileExistsError):
+        cc.publish(staged, target)
+    assert target.read_bytes() == b"existing"
+
+
+def test_publish_refuses_a_broken_symlink(tmp_path, monkeypatch):
+    staged = tmp_path / "staged.bin"
+    staged.write_bytes(b"new")
+    target = tmp_path / "target.bin"
+    try:
+        target.symlink_to(tmp_path / "missing")
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this platform: {exc}")
     with pytest.raises(FileExistsError):
         cc.publish(staged, target)
     monkeypatch.setattr(cc.os, "link", lambda a, b: (_ for _ in ()).throw(OSError(errno.EXDEV, "cross-device")))
@@ -804,15 +820,21 @@ def test_polish_keeps_japanese_flat_names(tmp_path):
     assert [layer.name for layer in out[1][0]] == ["下塗り", "下塗り (polished)"]
 
 
-def test_polished_name_stays_within_the_psd_limit(tmp_path):
+def test_polished_name_stays_within_the_psd_limit(tmp_path, capsys):
     source = artwork(tmp_path / "long.psd")
     psd = read_psd(source)
     psd[1][0][0].name = "x" * 250
     psd.save(source)
     configure(source)
     cc.polish(source)
-    name = read_psd(source.with_name("long-polished.psd"))[1][0][1].name
+    polished = source.with_name("long-polished.psd")
+    name = read_psd(polished)[1][0][1].name
     assert len(name) == 255 and name.endswith("x (polished)")
+    capsys.readouterr()
+    cc.compare(source, polished)
+    scored = capsys.readouterr().out
+    assert "matches 100.0%" in scored and "0 pixels still differ" in scored
+    assert "Not scored" not in scored
 
 
 def two_flats_one_group(path):
