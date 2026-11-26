@@ -38,4 +38,8 @@ From the Coloring Helper README by staryume, with the agent-facing consequences.
 - `<name>-polished-review.png`: before, after, and after with mint (edited) and amber (filled
   pocket, inspect) overlays, side by side at full size.
 - Both files appear together or not at all: they are written to a temporary folder next to the
-  output and hard-linked into place, refusing to replace existing files.
+  output and hard-linked into place (an exclusive copy on volumes without hard links, such as
+  exFAT), refusing to replace existing files. A killed run can leave that hidden
+  `.color-cleanup-*` folder behind.
+- Canvases over 40 MP are refused unless `--max-megapixels N` allows them (about 0.32 GB of memory
+  per megapixel with one flat).

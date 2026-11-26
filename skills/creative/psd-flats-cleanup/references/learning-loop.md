@@ -2,7 +2,9 @@
 
 `pfc compare Art.psd Art-finished.psd [--output diff.png]` reruns the tool on the source with the
 saved settings and scores it against a finished copy: a polished PSD whose `(polished)` flats the
-artist corrected by hand (or the original flats, if a flat was not polished).
+artist corrected by hand (or the original flats, if a flat was not polished). Each flat is matched
+by its full group path (`Girl / Hair (polished)`), so flats with the same name in different groups
+are scored separately; a path that appears twice in the finished file stops the comparison.
 
 It prints:
 
@@ -14,7 +16,8 @@ It prints:
 
 `Art-compare.png` shows the tool's flats on the left and the artist's on the right, with lineart
 darkened and every differing pixel in red. A flat the artist hid or removed in the finished file
-is not scored. Both PSDs must have the same canvas size.
+is not scored. Both PSDs must be 8-bit RGB with the same canvas size, and the output must be a new
+`.png` file.
 
 On staryume's 4096 px sample the tool reproduces 86.6% of 91,941 corrected pixels, changes 3,477
 that were left alone, and 15,802 still differ.
